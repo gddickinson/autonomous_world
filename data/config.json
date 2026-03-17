@@ -5,7 +5,7 @@
   "world_gen_mode": "planned",
   "history_years": 500,
   "player_mode": "mortal",
-  "spawn_location": "mainland",
+  "spawn_location": "test_island",
   "difficulty": "normal",
   "auto_save": true,
   "auto_save_interval": 5,

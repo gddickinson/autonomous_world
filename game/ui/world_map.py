@@ -321,7 +321,7 @@ class WorldMapView:
         import numpy as np
         from game.world.world import ChunkedWorld
 
-        if isinstance(world, ChunkedWorld) and world.width > 4000:
+        if isinstance(world, ChunkedWorld):
             self._build_full_map_from_plan(world)
             return
 
@@ -335,7 +335,18 @@ class WorldMapView:
                 color_lut[tile_type] = color
 
         # Convert tiles to numpy array for fast color mapping
-        tile_array = np.array(world.tiles, dtype=np.int32)
+        # world.tiles is a list-of-lists for non-chunked worlds
+        try:
+            tile_array = np.array(world.tiles, dtype=np.int32)
+        except (ValueError, TypeError):
+            # Fallback: tiles might be a ChunkGrid or other proxy
+            tile_array = np.zeros((h, w), dtype=np.int32)
+            for y in range(h):
+                for x in range(w):
+                    try:
+                        tile_array[y, x] = int(world.tiles[y][x])
+                    except Exception:
+                        pass
         # Clamp to valid range
         tile_array = np.clip(tile_array, 0, max_tile)
 
@@ -354,7 +365,12 @@ class WorldMapView:
         """Build world map from elevation cache (no chunk loading)."""
         import numpy as np
 
-        plan = world.plan
+        plan = getattr(world, 'plan', None)
+        if plan is None or not hasattr(plan, '_elev_cache'):
+            # No plan data — create a blank map
+            self._full_map_surface = pygame.Surface((200, 200))
+            self._full_map_surface.fill((40, 60, 40))
+            return
         elev = plan._elev_cache
         mh, mw = elev.shape
 

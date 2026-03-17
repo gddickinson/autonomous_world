@@ -1,0 +1,10 @@
+/data/chunks
+/exports
+/game/__pycache__
+/game/ai/__pycache__
+/game/core/__pycache__
+/game/data/__pycache__
+/game/network/__pycache__
+/game/systems/__pycache__
+/game/ui/__pycache__
+/game/world/__pycache__

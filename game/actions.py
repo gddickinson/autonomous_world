@@ -40,17 +40,88 @@ def _get_npcs_inside(game, interior):
 
 
 def _start_dialog(game, npc):
-    """Start a dialog with an NPC (delegates to existing dialog system)."""
-    # Regenerate dialog tree to reflect current state (relationship, emotions, needs)
+    """Start a dialog with an NPC — uses shared conversation_rules.
+
+    Uses shared conversation_rules for willingness checks.
+    Same rules apply to NPC-NPC conversations in social.py and sim_conversations.py.
+    """
+    from game.systems.conversation_rules import (
+        check_conversation_willingness, engage_conversation, delegate_response)
+
+    # Gather nearby NPCs for delegation checks
+    nearby = []
+    if hasattr(game, 'world_mgr'):
+        for other in game.world_mgr.npcs:
+            if other is npc or not other.alive:
+                continue
+            if (other.x - npc.x) ** 2 + (other.y - npc.y) ** 2 < 225:  # 15 tiles
+                nearby.append(other)
+
+    result = check_conversation_willingness(game.player, npc, nearby_allies=nearby)
+
+    if result == "delegate_attack":
+        # Important NPC orders guards to attack
+        responders = delegate_response(npc, game.player, nearby, "attack")
+        if responders:
+            names = ', '.join(getattr(r, 'name', '?') for r in responders[:2])
+            game.notifications.add(
+                f"{npc.name}: \"Guards! Seize them!\" ({names} attack!)", 4.0, (220, 50, 50))
+        else:
+            # Fallback to personal attack
+            npc.combat_target = game.player
+            npc.current_action = "fighting"
+            npc.state = "fighting"
+            game.notifications.add(f"{npc.name} attacks you!", 3.0, (220, 50, 50))
+        npc.add_memory("command", "Ordered my guards to deal with the player!", 4)
+        return
+
+    if result == "delegate_arrest":
+        # Important NPC has guards confront the player
+        responders = delegate_response(npc, game.player, nearby, "arrest")
+        if responders:
+            names = ', '.join(getattr(r, 'name', '?') for r in responders[:2])
+            game.notifications.add(
+                f"{npc.name}: \"You're not welcome here.\" ({names} move to intercept)", 3.0, (200, 150, 50))
+        npc.add_memory("political", "Had my guards warn the player away", 3)
+        return
+
+    if result == "attack":
+        npc.combat_target = game.player
+        npc.current_action = "fighting"
+        npc.state = "fighting"
+        game.notifications.add(f"{npc.name} attacks you!", 3.0, (220, 50, 50))
+        npc.add_memory("conflict", "The player approached me despite my hatred!", 4)
+        return
+    if result == "flee":
+        npc.flee_from(game.player.x, game.player.y)
+        game.notifications.add(f"{npc.name} runs away from you!", 2.0, (200, 150, 50))
+        npc.add_memory("fear", "The player approached me. I ran.", 3)
+        return
+    if result == "ignore":
+        game.notifications.add(f"{npc.name} ignores you.", 2.0, (150, 150, 150))
+        return
+    if result == "busy":
+        game.notifications.add(f"{npc.name} is too busy to talk right now.", 2.0, (200, 200, 100))
+        return
+
+    # --- AGREED TO TALK ---
+    engage_conversation(game.player, npc)
+
     npc.regenerate_dialog()
     game.ui.dialog_active = True
     game.ui.dialog_npc = npc
     game.ui.dialog_key = "greeting"
     game.ui.selected_response = 0
     npc.player_relationship = max(-100, min(100, npc.player_relationship + 1))
-    # Quest trigger: on_npc_interaction for bounty_hunt quests
+
     if hasattr(game, 'quest_sys'):
         game.quest_sys.on_npc_interaction(npc.name)
+
+
+def _end_dialog(game, npc):
+    """Restore NPC state after conversation ends."""
+    from game.systems.conversation_rules import disengage_conversation
+    disengage_conversation(npc)
 
 
 def interact(game):

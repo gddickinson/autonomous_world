@@ -6,7 +6,7 @@ import re
 from typing import List, Tuple
 from game.core.npc import NPC
 from game.core.player import Player
-from game.ai.prompts import Prompts, build_npc_context
+from game.ai.prompts import Prompts, build_npc_context, mock_npc_decision
 from game.settings import *
 
 

@@ -396,14 +396,49 @@ class SocialSystem:
             nearby = [n for n in alive if n is not npc_a and
                       (n.x - npc_a.x) ** 2 + (n.y - npc_a.y) ** 2 <= r_sq]
 
+        from game.systems.conversation_rules import (
+            check_conversation_willingness, engage_conversation,
+            disengage_conversation, delegate_response)
+
         for npc_b in nearby:
             if npc_b is npc_a or not npc_b.alive:
                 continue
-            if npc_b.current_action in ("fighting", "sleeping", "fleeing"):
-                continue
             if random.random() > 0.15:
                 continue
+
+            # Both NPCs must be willing to talk
+            will_a = check_conversation_willingness(npc_b, npc_a, nearby_allies=nearby)
+            will_b = check_conversation_willingness(npc_a, npc_b, nearby_allies=nearby)
+
+            if will_b == "delegate_attack":
+                # npc_b orders allies to attack npc_a
+                delegate_response(npc_b, npc_a, nearby, "attack")
+                npc_b.add_memory("command", f"Ordered guards to attack {npc_a.name}!", 4)
+                return
+            if will_b == "delegate_arrest":
+                delegate_response(npc_b, npc_a, nearby, "arrest")
+                return
+            if will_b == "attack":
+                npc_b.combat_target = npc_a
+                npc_b.current_action = "fighting"
+                npc_b.state = "fighting"
+                npc_b.add_memory("conflict", f"Attacked {npc_a.name} on sight!", 3)
+                return
+            if will_b == "flee":
+                npc_b.flee_from(npc_a.x, npc_a.y)
+                return
+            if will_b in ("busy", "ignore", "refuse"):
+                continue
+            if will_a in ("busy", "ignore", "refuse", "flee", "attack"):
+                continue
+
+            # Both willing — engage both in conversation
+            engage_conversation(npc_a, npc_b)
+            engage_conversation(npc_b, npc_a)
             self._do_social_interaction(npc_a, npc_b)
+            # Disengage after interaction
+            disengage_conversation(npc_a)
+            disengage_conversation(npc_b)
             return  # One interaction per tick
 
     def _do_social_interaction(self, npc_a, npc_b):

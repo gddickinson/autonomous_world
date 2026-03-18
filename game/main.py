@@ -213,6 +213,10 @@ class Game(DialogResultsMixin, MultiplayerMixin):
         self.show_minimap = False  # off by default, toggle with N
         self.auto_save_timer = 0.0  # counts up to auto_save_interval
 
+        # Object highlighting system (J to toggle, K for category picker)
+        from game.ui.highlight import HighlightSystem
+        self.highlight = HighlightSystem()
+
         # Claude AI assistant (God Mode only)
         self.claude_assistant = ClaudeAssistant(self)
         self.god_console = GodConsole(self)
@@ -661,6 +665,7 @@ class Game(DialogResultsMixin, MultiplayerMixin):
                 self._process_dialog_result(npc, result)
             elif result == "close":
                 actions.check_npc_quest(self, npc)
+                actions._end_dialog(self, npc)  # restore NPC state
             return
         if self.ui.gift_active:
             given_item = self.ui.handle_gift_input(key, self.player)
@@ -769,6 +774,10 @@ class Game(DialogResultsMixin, MultiplayerMixin):
         if hasattr(self, 'god_ui') and getattr(self.player, 'god', False):
             if self.god_ui.handle_key(key, unicode_char, mods):
                 return
+
+        # Object highlighting (J/K keys)
+        if hasattr(self, 'highlight') and self.highlight.handle_key(key):
+            return
 
         # Game controls
         action_map = {
@@ -2205,6 +2214,13 @@ class Game(DialogResultsMixin, MultiplayerMixin):
                 self.screen.blit(flash, (0, 0))
 
             self.ui.draw_hud(self.player, self.time_sys)
+
+            # Object highlighting overlay
+            if hasattr(self, 'highlight'):
+                self.highlight.draw_highlights(self.screen, self.world,
+                                                self.camera, self.player)
+                self.highlight.draw_picker(self.screen)
+
             self.active_renderer.draw_minimap(self.world, self.player,
                                               self.world_mgr.npcs, self.world_mgr.creatures,
                                               self.show_minimap)

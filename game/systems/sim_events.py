@@ -8,6 +8,26 @@ from game.core.player import Player
 from game.settings import *
 
 
+EVENT_TEMPLATES = [
+    {"name": "Drought", "desc": "A harsh drought grips the land.",
+     "radius": 60, "duration": 120, "effects": {"thirst_mult": 2.0}},
+    {"name": "Storm", "desc": "A violent storm sweeps through!",
+     "radius": 50, "duration": 60, "effects": {"speed_mult": 0.5, "rest_mult": 1.5}},
+    {"name": "Bountiful Harvest", "desc": "The land is blessed with abundance.",
+     "radius": 40, "duration": 90, "effects": {"hunger_mult": 0.5}},
+    {"name": "Plague", "desc": "A sickness spreads through the area.",
+     "radius": 45, "duration": 80, "effects": {"plague_dps": 0.5}},
+    {"name": "Festival", "desc": "A joyous festival! Spirits are lifted.",
+     "radius": 30, "duration": 60, "effects": {"social_boost": 1.0}},
+    {"name": "Wolf Pack", "desc": "Wolves have been spotted prowling nearby.",
+     "radius": 35, "duration": 90, "effects": {"danger": "wolves"}},
+    {"name": "Merchant Caravan", "desc": "A traveling merchant has arrived!",
+     "radius": 20, "duration": 60, "effects": {"trade_bonus": True}},
+    {"name": "Earthquake", "desc": "The ground shakes!",
+     "radius": 50, "duration": 10, "effects": {"destroy_chance": 0.1}},
+]
+
+
 class WorldEvent:
     """A random event affecting the world."""
     def __init__(self, name: str, description: str, x: float, y: float,

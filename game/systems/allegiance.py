@@ -147,6 +147,12 @@ def get_relation(entity_a, entity_b) -> Relation:
     if a_home and b_home and a_home == b_home:
         return Relation.FRIENDLY  # same village = friendly
 
+    # --- NPC default: civilized NPCs are friendly to each other ---
+    a_is_npc = hasattr(entity_a, 'char_class') and hasattr(entity_a, 'npc_attack_damage')
+    b_is_npc = hasattr(entity_b, 'char_class') and hasattr(entity_b, 'npc_attack_damage')
+    if a_is_npc and b_is_npc:
+        return Relation.FRIENDLY  # NPCs are friendly by default
+
     # --- CREATURE KIND ---
     a_kind = getattr(entity_a, 'kind', '')
     b_kind = getattr(entity_b, 'kind', '')
@@ -169,13 +175,11 @@ def get_relation(entity_a, entity_b) -> Relation:
     if a_is_npc and b_is_creature:
         if getattr(entity_b, 'passive', False):
             return Relation.NEUTRAL
-        if a_home:
-            return Relation.HOSTILE
+        return Relation.HOSTILE  # hostile creatures are enemies to all NPCs
     if b_is_npc and a_is_creature:
         if getattr(entity_a, 'passive', False):
             return Relation.NEUTRAL
-        if b_home:
-            return Relation.HOSTILE
+        return Relation.HOSTILE
 
     # --- PREDATOR vs PREY ---
     if a_is_creature and b_is_creature:

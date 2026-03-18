@@ -36,12 +36,29 @@ class SimConversationsMixin:
             npc.state_timer = 10.0
             return
 
+        # Check willingness using shared conversation rules
+        from game.systems.conversation_rules import (
+            check_conversation_willingness, engage_conversation, disengage_conversation)
+
+        will_other = check_conversation_willingness(npc, other)
+        if will_other == "attack":
+            other.combat_target = npc
+            other.current_action = "fighting"
+            other.state = "fighting"
+            return
+        if will_other == "flee":
+            other.flee_from(npc.x, npc.y)
+            return
+        if will_other in ("busy", "ignore", "refuse"):
+            npc.current_action = ""
+            return
+
+        # Both engage
+        engage_conversation(npc, other)
+        engage_conversation(other, npc)
+
         conv = Conversation(npc, other)
         self.conversations.append(conv)
-        npc.current_action = "talking"
-        other.current_action = "talking"
-        npc.state = "socializing"
-        other.state = "socializing"
         npc.needs["social"] = min(100, npc.needs["social"] + 15)
         other.needs["social"] = min(100, other.needs["social"] + 10)
 
@@ -121,10 +138,10 @@ class SimConversationsMixin:
             if conv.timer <= 0:
                 # Exchange information
                 self._spread_information(conv.npc1, conv.npc2)
-                conv.npc1.current_action = ""
-                conv.npc2.current_action = ""
-                conv.npc1.state = "idle"
-                conv.npc2.state = "idle"
+                # Restore both NPCs to their pre-conversation state
+                from game.systems.conversation_rules import disengage_conversation
+                disengage_conversation(conv.npc1)
+                disengage_conversation(conv.npc2)
             else:
                 remaining.append(conv)
         self.conversations = remaining

@@ -117,23 +117,25 @@ class AbstractSimulation:
         """
         self.active_zone_center = (player_x, player_y)
 
-        # Categorize settlements
+        # Categorize settlements (squared distance avoids sqrt)
+        abstract_r_sq = self.ABSTRACT_RADIUS ** 2
         for name, abstract in self.abstracts.items():
-            dist = math.sqrt((abstract.x - player_x)**2 + (abstract.y - player_y)**2)
-
-            if dist > self.ABSTRACT_RADIUS:
-                # Far away - abstract simulation only
+            dx = abstract.x - player_x
+            dy = abstract.y - player_y
+            if dx * dx + dy * dy > abstract_r_sq:
                 abstract.update_abstract(dt, day)
 
         # Decide which live NPCs should be active vs dormant (for detailed sim)
         new_active = set()
         new_dormant = set()
+        detail_r_sq = self.DETAIL_RADIUS ** 2
 
         for npc in npcs:
             if not npc.alive:
                 continue
-            dist = math.sqrt((npc.x - player_x)**2 + (npc.y - player_y)**2)
-            if dist < self.DETAIL_RADIUS:
+            dx = npc.x - player_x
+            dy = npc.y - player_y
+            if dx * dx + dy * dy < detail_r_sq:
                 new_active.add(npc.name)
             else:
                 new_dormant.add(npc.name)

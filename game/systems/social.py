@@ -372,7 +372,7 @@ class SocialSystem:
                         ledger.record_bond(npc_a.name, "enemy", 0,
                                           trust=int(rel_ba.trust))
 
-    def update(self, dt: float, npcs: list, player):
+    def update(self, dt: float, npcs: list, player, npc_grid=None):
         """Periodic social interactions between nearby NPCs."""
         self.interaction_timer -= dt
         if self.interaction_timer > 0:
@@ -380,24 +380,31 @@ class SocialSystem:
 
         self.interaction_timer = random.uniform(3.0, 8.0)
 
-        # Find pairs of nearby NPCs and trigger social interactions
-        for npc_a in npcs:
-            if not npc_a.alive or npc_a.current_action in ("fighting", "sleeping", "fleeing"):
+        # Pick a random NPC and find nearby candidates via spatial grid
+        # This is O(k) instead of O(n²) where k = nearby NPCs
+        alive = [n for n in npcs if n.alive and
+                 n.current_action not in ("fighting", "sleeping", "fleeing")]
+        if not alive:
+            return
+        npc_a = random.choice(alive)
+
+        if npc_grid:
+            nearby = npc_grid.get_nearby(npc_a.x, npc_a.y, NPC_CONVERSATION_RANGE)
+        else:
+            # Fallback: squared-distance check (still O(n) but no sqrt)
+            r_sq = NPC_CONVERSATION_RANGE * NPC_CONVERSATION_RANGE
+            nearby = [n for n in alive if n is not npc_a and
+                      (n.x - npc_a.x) ** 2 + (n.y - npc_a.y) ** 2 <= r_sq]
+
+        for npc_b in nearby:
+            if npc_b is npc_a or not npc_b.alive:
                 continue
-            for npc_b in npcs:
-                if npc_b is npc_a or not npc_b.alive:
-                    continue
-                if npc_b.current_action in ("fighting", "sleeping", "fleeing"):
-                    continue
-                if npc_a.dist_to(npc_b) > NPC_CONVERSATION_RANGE:
-                    continue
-
-                # Random chance of interaction
-                if random.random() > 0.15:
-                    continue
-
-                self._do_social_interaction(npc_a, npc_b)
-                return  # One interaction per tick
+            if npc_b.current_action in ("fighting", "sleeping", "fleeing"):
+                continue
+            if random.random() > 0.15:
+                continue
+            self._do_social_interaction(npc_a, npc_b)
+            return  # One interaction per tick
 
     def _do_social_interaction(self, npc_a, npc_b):
         """Execute a social interaction between two NPCs."""

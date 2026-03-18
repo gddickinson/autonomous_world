@@ -21,6 +21,12 @@ class Entity:
         dy = self.y - other.y
         return math.sqrt(dx * dx + dy * dy)
 
+    def dist_to_sq(self, other) -> float:
+        """Squared distance — use for comparisons to avoid sqrt."""
+        dx = self.x - other.x
+        dy = self.y - other.y
+        return dx * dx + dy * dy
+
     def dist_to_pos(self, x: float, y: float) -> float:
         dx = self.x - x
         dy = self.y - y

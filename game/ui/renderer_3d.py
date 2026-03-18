@@ -379,7 +379,7 @@ class Renderer3D:
     def draw_battle_visuals(self, *args, **kwargs):
         pass
 
-    def draw_particles(self, camera, dt):
+    def draw_particles(self, camera, dt, player=None):
         # Update particle positions but don't render (could add GL particles later)
         self.particles = [(x, y, vx, vy, life - dt, color)
                           for x, y, vx, vy, life, color in self.particles

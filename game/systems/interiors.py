@@ -305,6 +305,21 @@ BUILDING_ROOM_SETS = {
     "ruins": ["entry_hall", "corridor", "dungeon_cell", "dungeon_cell",
               "storage", "corridor", "stairwell"],
     "cave": ["entry_hall", "corridor", "corridor", "storage"],
+
+    # === ENTERTAINMENT / ARENA ===
+    "colosseum": ["entry_hall",
+                  "dormitory", "dormitory",       # gladiator barracks
+                  "commander_quarters",            # arena master
+                  "infirmary",                     # medical room for fighters
+                  "storage", "storage",            # weapon/armor storage
+                  "dining_hall",                   # fighters' mess
+                  "guard_room", "guard_room",      # arena guards
+                  "stairwell"],
+    "arena": ["entry_hall",
+              "dormitory",                         # fighters' quarters
+              "guard_room",                        # arena guard
+              "storage",                           # weapons
+              "infirmary"],                        # patch-up room
 }
 
 

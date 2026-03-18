@@ -180,9 +180,10 @@ class Creature(Entity):
         if _anger > 0.4:
             _effective_aggro = self.aggro_range * (1.0 + _anger * 0.5)
 
-        # Hostile state machine
+        # Hostile state machine — respects allegiance
+        from game.systems.allegiance import should_attack as _should_atk
         if self.state == "idle":
-            if dist_to_player < _effective_aggro and player.alive:
+            if dist_to_player < _effective_aggro and player.alive and _should_atk(self, player):
                 self.state = "chasing"
                 self.target = player
             elif self.state_timer <= 0:
@@ -190,7 +191,7 @@ class Creature(Entity):
                 self.state_timer = random.uniform(3.0, 8.0)
 
         elif self.state == "wandering":
-            if dist_to_player < _effective_aggro and player.alive:
+            if dist_to_player < _effective_aggro and player.alive and _should_atk(self, player):
                 self.state = "chasing"
                 self.target = player
             elif self.state_timer <= 0:

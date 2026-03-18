@@ -636,7 +636,12 @@ def _creature_seek_food(creature, dt, world, creatures_list, intel):
                     creature.target = other
                     _move_toward(creature, other.x, other.y, dt, world)
                     if creature.dist_to(other) < 1.5:
-                        other.take_damage(creature.damage)
+                        from game.systems.combat import CombatSystem
+                        # Pass nearby creatures so pack hunters get their bonus
+                        CombatSystem.creature_combat_tick(
+                            creature, other, dt,
+                            nearby_allies=creatures_list,
+                        )
                         if not other.alive:
                             creature.needs["hunger"] = min(100, creature.needs["hunger"] + 40)
                             creature.state = "idle"

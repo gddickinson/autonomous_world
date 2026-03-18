@@ -21,7 +21,8 @@ from game.settings import (WALL, FLOOR, DOOR, TABLE, BED, CHEST,
                            STAIRS_UP, STAIRS_DOWN, WINDOW, LOCKED_DOOR, GRASS,
                            PILLAR, ALTAR, FIREPLACE, LADDER_UP, LADDER_DOWN,
                            THRONE, BOOKSHELF, BARREL, ANVIL, FORGE_FIRE,
-                           FOUNTAIN, CARPET, MOSAIC, ARCHWAY, IRON_GATE)
+                           FOUNTAIN, CARPET, MOSAIC, ARCHWAY, IRON_GATE,
+                           COURTYARD, ARENA_SAND)
 from game.world.buildings import Blueprint
 import random
 from typing import List
@@ -31,6 +32,7 @@ W=WALL; F=FLOOR; D=DOOR; T=TABLE; B=BED; C=CHEST; N=WINDOW; L=LOCKED_DOOR
 S=STAIRS_UP; s=STAIRS_DOWN; P=PILLAR; A=ALTAR; H=FIREPLACE
 U=LADDER_UP; u=LADDER_DOWN; K=THRONE; X=BOOKSHELF; R=BARREL
 V=ANVIL; G=FORGE_FIRE; O=FOUNTAIN; Q=CARPET; M=MOSAIC; E=ARCHWAY; I=IRON_GATE
+Y=COURTYARD; Z=ARENA_SAND
 _=GRASS
 
 # ================================================================
@@ -614,6 +616,130 @@ CIVIC = [
 ]
 
 # ================================================================
+# ENTERTAINMENT / ARENA
+# ================================================================
+
+ENTERTAINMENT = [
+    # Grand Colosseum — ~70x55, massive arena for army battles
+    # Outer colonnade (F+P), middle spectator gallery (F), inner courtyard (Y), central arena (Z)
+    # The blueprint is generated programmatically due to its size
+]
+
+def _build_colosseum_blueprint():
+    """Generate the grand colosseum blueprint (70x55 tiles)."""
+    bw, bh = 70, 55
+    # Start with exterior (grass)
+    tiles = [[_ for _ in range(bw)] for _ in range(bh)]
+
+    # Helper to set a tile safely
+    def put(x, y, t):
+        if 0 <= x < bw and 0 <= y < bh:
+            tiles[y][x] = t
+
+    # Outer wall (elliptical shape for authenticity)
+    import math as _m
+    cx, cy = bw // 2, bh // 2
+    rx_out, ry_out = bw // 2 - 1, bh // 2 - 1
+    rx_col, ry_col = rx_out - 3, ry_out - 3      # colonnade inner edge
+    rx_seat, ry_seat = rx_out - 7, ry_out - 7     # seating inner edge
+    rx_court, ry_court = rx_out - 11, ry_out - 11  # courtyard inner edge
+    rx_arena, ry_arena = rx_out - 15, ry_out - 15  # arena floor inner edge
+
+    for y in range(bh):
+        for x in range(bw):
+            dx, dy = x - cx, y - cy
+            # Normalised ellipse distances
+            d_out = (dx / rx_out) ** 2 + (dy / ry_out) ** 2
+            d_col = (dx / rx_col) ** 2 + (dy / ry_col) ** 2 if rx_col > 0 else 99
+            d_seat = (dx / rx_seat) ** 2 + (dy / ry_seat) ** 2 if rx_seat > 0 else 99
+            d_court = (dx / rx_court) ** 2 + (dy / ry_court) ** 2 if rx_court > 0 else 99
+            d_arena = (dx / rx_arena) ** 2 + (dy / ry_arena) ** 2 if rx_arena > 0 else 99
+
+            if d_out > 1.0:
+                continue  # outside, leave as grass
+            elif d_out > 0.95:
+                put(x, y, W)  # outer wall
+            elif d_col > 1.0:
+                put(x, y, F)  # colonnade walkway
+            elif d_col > 0.92:
+                put(x, y, W)  # inner colonnade wall
+            elif d_seat > 1.0:
+                put(x, y, F)  # spectator seating gallery
+            elif d_court > 1.0:
+                put(x, y, W)  # arena wall
+            elif d_arena > 1.0:
+                put(x, y, Y)  # courtyard / spectator ring
+            else:
+                put(x, y, Z)  # arena fighting floor
+
+    # Place pillars in colonnade (every 5 tiles around the ellipse)
+    for angle_deg in range(0, 360, 8):
+        a = _m.radians(angle_deg)
+        px = int(cx + (rx_out - 2) * _m.cos(a))
+        py = int(cy + (ry_out - 2) * _m.sin(a))
+        if 0 <= px < bw and 0 <= py < bh and tiles[py][px] == F:
+            put(px, py, P)
+
+    # Grand entrance (south) — wide doorway
+    for dx in range(-3, 4):
+        put(cx + dx, bh - 2, D)
+        put(cx + dx, bh - 3, F)
+
+    # Secondary entrances (east, west, north)
+    for dx in range(-2, 3):
+        put(cx + dx, 1, D)  # north
+    for dy in range(-2, 3):
+        put(1, cy + dy, D)   # west
+        put(bw - 2, cy + dy, D)  # east
+
+    # Arena gates (iron gates into the fighting floor from courtyard)
+    # North and south arena entrances
+    arena_n = cy - int(ry_court) + 1
+    arena_s = cy + int(ry_court) - 1
+    for dx in range(-1, 2):
+        put(cx + dx, arena_n, I)
+        put(cx + dx, arena_s, I)
+
+    # East and west arena entrances
+    arena_w = cx - int(rx_court) + 1
+    arena_e = cx + int(rx_court) - 1
+    for dy in range(-1, 2):
+        put(arena_w, cy + dy, E)
+        put(arena_e, cy + dy, E)
+
+    # Archway spectator entrances into the seating from colonnade
+    for angle_deg in [45, 135, 225, 315]:
+        a = _m.radians(angle_deg)
+        ex = int(cx + (rx_col - 1) * _m.cos(a))
+        ey = int(cy + (ry_col - 1) * _m.sin(a))
+        put(ex, ey, E)
+
+    return Blueprint("Colosseum", "colosseum", tiles,
+                     npc_class="Fighter", npc_count=12,
+                     description="A grand elliptical colosseum with tiered seating, "
+                                 "colonnade, courtyard, and central arena floor "
+                                 "large enough for army battles.")
+
+ENTERTAINMENT.append(_build_colosseum_blueprint())
+
+ENTERTAINMENT.append(
+    # Smaller fighting pit for villages/towns
+    Blueprint("Fighting Pit", "arena", [
+        [W, W, W, W, W, W, W, W, W, W, W, W],
+        [W, F, F, P, F, F, F, F, P, F, F, W],
+        [W, F, W, W, W, W, W, W, W, W, F, W],
+        [W, P, W, Z, Z, Z, Z, Z, Z, W, P, W],
+        [W, F, W, Z, Z, Z, Z, Z, Z, W, F, W],
+        [W, F, W, Z, Z, Z, Z, Z, Z, W, F, W],
+        [W, F, W, Z, Z, Z, Z, Z, Z, W, F, W],
+        [W, P, W, W, W, I, I, W, W, W, P, W],
+        [W, F, F, F, F, F, F, F, F, F, F, W],
+        [W, W, W, W, W, D, D, W, W, W, W, W],
+    ], npc_class="Fighter", npc_count=4,
+       description="A fighting pit with sand floor and spectator gallery.")
+)
+
+# ================================================================
 # MASTER LIBRARY
 # ================================================================
 
@@ -631,6 +757,7 @@ BLUEPRINT_LIBRARY = {
     "agricultural": AGRICULTURAL,
     "noble": NOBLE,
     "civic": CIVIC,
+    "entertainment": ENTERTAINMENT,
 }
 
 ALL_BLUEPRINTS = []
@@ -675,7 +802,7 @@ def get_blueprints_for_settlement(settlement_kind: str,
             candidates += NOBLE[:1] + CIVIC[1:]
     elif settlement_kind == "city":
         candidates = (MEDIEVAL_HOUSES + MEDIEVAL_COMMERCIAL + TAVERNS +
-                     INDUSTRIAL + TEMPLES + MILITARY + CIVIC + NOBLE)
+                     INDUSTRIAL + TEMPLES + MILITARY + CIVIC + NOBLE + ENTERTAINMENT)
     elif settlement_kind == "castle":
         candidates = NOBLE + MILITARY + [TEMPLES[3], TAVERNS[1]]
     else:

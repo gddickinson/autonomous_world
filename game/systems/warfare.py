@@ -685,3 +685,144 @@ def build_army_from_creatures(name: str, creatures: list,
 
     units = [TroopUnit(utype, count, equipment_quality=0.8) for utype, count in unit_groups.items()]
     return BattleArmy(name, units, Commander(leadership=1, name=name), is_defender=is_defender)
+
+
+# ================================================================
+# MILITARY UNIT SYSTEM — tags individual entities as soldiers
+# ================================================================
+
+class MilitaryUnit:
+    """A group of NPCs fighting as an organized military unit.
+
+    Bridges warfare.py troop data into individual entity combat by:
+    - Tagging NPCs with unit_type, formation, and commander
+    - Applying formation bonuses to their combat stats
+    - Coordinating movement (maintain formation spacing)
+    - Morale cascade (unit breaks when enough members flee/die)
+    """
+
+    def __init__(self, name: str, unit_type: str, formation: str = None,
+                 commander_name: str = ""):
+        self.name = name
+        self.unit_type = unit_type
+        self.formation = formation
+        self.commander_name = commander_name
+        self.members: List = []  # list of NPC/Creature entities
+        self.morale = 70
+        self.routed = False
+
+        stats = UNIT_STATS.get(unit_type, UNIT_STATS["infantry_sword"])
+        self.category = stats.get("category", "infantry")
+        self.base_stats = stats
+
+    @property
+    def alive_count(self) -> int:
+        return sum(1 for m in self.members if m.alive)
+
+    @property
+    def size(self) -> int:
+        return len(self.members)
+
+    def add_member(self, entity):
+        """Add an NPC or creature to this unit."""
+        self.members.append(entity)
+        # Tag entity with unit info
+        entity._military_unit = self
+        entity._unit_type = self.unit_type
+        entity._unit_formation = self.formation
+
+    def get_formation_mods(self) -> dict:
+        """Get current formation modifiers."""
+        if not self.formation or self.formation not in FORMATIONS:
+            return {"defense_mult": 1.0, "attack_mult": 1.0, "speed_mult": 1.0}
+        return FORMATIONS[self.formation]
+
+    def get_matchup_bonus(self, enemy_category: str) -> float:
+        """Get damage multiplier against enemy unit category."""
+        key = (self.category, enemy_category)
+        base = MATCHUP_BONUS.get(key, 1.0)
+        # Spear vs cavalry bonus
+        if enemy_category == "cavalry" and "bonus_vs_cavalry" in self.base_stats:
+            base = max(base, self.base_stats["bonus_vs_cavalry"])
+        return base
+
+    def set_formation(self, formation: str):
+        """Change formation and apply modifiers to all members."""
+        self.formation = formation
+        for m in self.members:
+            m._unit_formation = formation
+
+    def update_morale(self):
+        """Update unit morale based on casualties and combat state."""
+        if not self.members:
+            return
+        alive = self.alive_count
+        total = self.size
+        casualty_ratio = 1.0 - (alive / max(1, total))
+
+        # Morale drops with casualties
+        self.morale = max(0, 70 - int(casualty_ratio * 60))
+
+        # Check rout
+        threshold = self.base_stats.get("morale_threshold", 25)
+        if self.morale < threshold and not self.routed:
+            self.routed = True
+            # All surviving members flee
+            for m in self.members:
+                if m.alive and hasattr(m, 'state'):
+                    m.state = "fleeing"
+                    if hasattr(m, 'current_action'):
+                        m.current_action = "fleeing"
+
+    def rally(self, leadership: int = 0) -> bool:
+        """Commander attempts to rally a routed unit."""
+        if not self.routed:
+            return False
+        chance = 0.2 + leadership * 0.04
+        if random.random() < chance:
+            self.routed = False
+            self.morale = max(self.morale, 30)
+            for m in self.members:
+                if m.alive and hasattr(m, 'state') and m.state == "fleeing":
+                    m.state = "idle"
+                    if hasattr(m, 'current_action'):
+                        m.current_action = ""
+            return True
+        return False
+
+
+def apply_unit_combat_mods(attacker, target) -> Tuple[float, float]:
+    """Get attack and defense multipliers from military unit system.
+
+    Called from CombatSystem.npc_combat_tick to apply formation bonuses
+    and rock-paper-scissors matchup bonuses to individual attacks.
+
+    Returns: (attack_mult, defense_mult)
+    """
+    atk_mult = 1.0
+    def_mult = 1.0
+
+    atk_unit = getattr(attacker, '_military_unit', None)
+    tgt_unit = getattr(target, '_military_unit', None)
+
+    if atk_unit:
+        mods = atk_unit.get_formation_mods()
+        atk_mult *= mods.get("attack_mult", 1.0)
+
+        # Matchup bonus against target's unit category
+        if tgt_unit:
+            atk_mult *= atk_unit.get_matchup_bonus(tgt_unit.category)
+
+    if tgt_unit:
+        mods = tgt_unit.get_formation_mods()
+        def_mult *= mods.get("defense_mult", 1.0)
+
+    return atk_mult, def_mult
+
+
+def get_unit_speed_mult(entity) -> float:
+    """Get speed multiplier from formation."""
+    unit = getattr(entity, '_military_unit', None)
+    if unit and unit.formation and unit.formation in FORMATIONS:
+        return FORMATIONS[unit.formation].get("speed_mult", 1.0)
+    return 1.0

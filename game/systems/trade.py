@@ -75,7 +75,7 @@ class TradeSystem:
         for s in settlements:
             others = sorted(
                 [o for o in settlements if o is not s],
-                key=lambda o: math.sqrt((o.x - s.x)**2 + (o.y - s.y)**2)
+                key=lambda o: (o.x - s.x)**2 + (o.y - s.y)**2  # squared dist preserves sort order
             )
             for partner in others[:random.randint(1, 3)]:
                 route = (s.name, partner.name)

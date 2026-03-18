@@ -242,6 +242,76 @@ class MonsterGroup:
         dy = creature.y - self.base_y
         return dx * dx + dy * dy <= self.territory_radius ** 2
 
+    def form_military_units(self, creatures: list) -> list:
+        """Organize group members into MilitaryUnits for real combat.
+
+        Maps monster kinds to warfare unit types and assigns formations
+        based on governance style. Returns list of MilitaryUnit objects.
+
+        Orc warbands form shield_wall infantry + archer support.
+        Goblin tribes form skirmish packs.
+        Undead hordes form defensive_circle with brute front line.
+        Bandits form ambush groups.
+        """
+        from game.systems.warfare import MilitaryUnit, UNIT_STATS
+
+        # Map creature kinds to warfare unit types
+        kind_to_unit = {
+            "orc": "infantry_sword", "bugbear": "infantry_sword",
+            "goblin": "infantry_sword", "kobold": "infantry_sword",
+            "gnoll": "infantry_sword", "bandit": "infantry_sword",
+            "skeleton": "infantry_spear", "zombie": "infantry_sword",
+            "ghoul": "infantry_sword", "wight": "infantry_sword",
+        }
+
+        # Governance-based formation choice
+        formation_map = {
+            "orc": "shield_wall",
+            "goblin": "skirmish_line",
+            "kobold": "defensive_circle",
+            "bandit": None,  # ambush — no fixed formation
+            "gnoll": None,   # feral charge
+            "undead": "defensive_circle",
+        }
+        formation = formation_map.get(self.kind)
+
+        # Find actual creature entities belonging to this group
+        my_creatures = [c for c in creatures if c.alive and
+                        getattr(c, 'kind', '').lower() in CREATURE_GOVERNANCE_MAP and
+                        CREATURE_GOVERNANCE_MAP.get(c.kind.lower()) == self.kind and
+                        self._in_territory(c)]
+
+        if not my_creatures:
+            return []
+
+        # Group by creature kind
+        by_kind = {}
+        for c in my_creatures:
+            by_kind.setdefault(c.kind.lower(), []).append(c)
+
+        units = []
+        for kind, members in by_kind.items():
+            unit_type = kind_to_unit.get(kind, "infantry_sword")
+            mil_unit = MilitaryUnit(
+                f"{self.kind}_{kind}", unit_type, formation)
+
+            for creature in members:
+                mil_unit.add_member(creature)
+
+            units.append(mil_unit)
+
+        # Assign leader as commander for morale rally
+        if self.leader_name and units:
+            for c in my_creatures:
+                if getattr(c, 'name', '') == self.leader_name or \
+                   getattr(c, 'kind', '') == self.leader_name:
+                    # Tag leader
+                    c._is_commander = True
+                    break
+
+        self.events.append(f"Formed {len(units)} military units ({len(my_creatures)} warriors)")
+        return units
+
     def update(self, dt: float, day: int, creatures: list,
                settlements: dict = None, other_groups: list = None):
         """Update monster society."""

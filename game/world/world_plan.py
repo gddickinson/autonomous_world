@@ -974,9 +974,9 @@ class WorldPlan:
 
     def _plan_test_island(self):
         """Plan the isolated test island in deep ocean."""
-        island_w, island_h = 120, 80
-        ix = int(self.width * 0.90)
-        iy = int(self.height * 0.10)
+        island_w, island_h = 200, 120
+        ix = int(self.width * 0.92)
+        iy = int(self.height * 0.07)
 
         buf = 10
         ix = max(island_w // 2 + buf, min(self.width - island_w // 2 - buf, ix))
@@ -1001,6 +1001,25 @@ class WorldPlan:
         self.special_locations.append(SpecialLocation(
             name="Temple of Testing", kind="temple",
             x=temple_x, y=temple_y, radius=5,
+        ))
+
+        # Colosseum — east of temple, large enough for army battles
+        col_x = ix + 40
+        col_y = iy
+        self.special_locations.append(SpecialLocation(
+            name="Test Colosseum", kind="colosseum",
+            x=col_x, y=col_y, radius=35,
+        ))
+        # Register as settlement so building system finds it
+        self.settlements.append(SettlementPlan(
+            name="Test Colosseum", kind="hamlet",
+            x=col_x, y=col_y, radius=40,
+            region="", race="Human", population=0,
+            buildings=[{
+                "kind": "colosseum", "name": "Test Colosseum",
+                "x": col_x - 35, "y": col_y - 28, "w": 70, "h": 55,
+                "bp_tiles": None,
+            }],
         ))
 
         # Test building: 3 stories + underground, east of temple

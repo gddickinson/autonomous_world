@@ -117,6 +117,8 @@ DIRT_TRACK = 64     # minor path between hamlets
 COBBLESTONE = 65    # paved city road (fastest)
 STABLE_FLOOR = 66   # stable interior (walkable, mount-related)
 GRAVESTONE = 67     # grave marker (walkable, interactable)
+COURTYARD = 68      # open courtyard (walkable, outdoor interior)
+ARENA_SAND = 69     # arena fighting floor (walkable, combat zone)
 
 # Multiplayer
 DEFAULT_PORT = 7777
@@ -191,6 +193,8 @@ TERRAIN_COLORS = {
     COBBLESTONE:  (145, 145, 150),
     STABLE_FLOOR: (140, 115, 75),
     GRAVESTONE:   (140, 135, 130),
+    COURTYARD:    (180, 170, 140),
+    ARENA_SAND:   (200, 180, 120),
 }
 
 TERRAIN_WALK_COST = {
@@ -262,6 +266,8 @@ TERRAIN_WALK_COST = {
     COBBLESTONE: 0.55,   # best road surface
     STABLE_FLOOR: 0.8,   # stable interior
     GRAVESTONE: 1.0,     # walkable grave marker
+    COURTYARD: 0.9,     # open courtyard, slightly slower than floor
+    ARENA_SAND: 1.0,    # arena fighting floor
 }
 
 # Colors

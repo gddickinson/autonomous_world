@@ -163,8 +163,9 @@ class DemographicsSystem:
                 self.families[fid].wealth = rng.randint(200, 500)
 
             # Assign some nearby NPCs as guards, servants, duke
-            nearby = [(other, npc.dist_to(other)) for other in npcs
-                      if other is not npc and other.alive and npc.dist_to(other) < 20]
+            r_sq = 20 * 20
+            nearby = [(other, npc.dist_to_sq(other)) for other in npcs
+                      if other is not npc and other.alive and npc.dist_to_sq(other) < r_sq]
             nearby.sort(key=lambda x: x[1])
 
             for i, (other, dist) in enumerate(nearby[:8]):

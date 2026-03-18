@@ -1014,7 +1014,7 @@ class AdventureRenderer:
                 pygame.draw.circle(event_surf, color, (r, r), r)
                 self.screen.blit(event_surf, (int(sx) - r, int(sy) - r))
 
-    def draw_particles(self, camera, time_val):
+    def draw_particles(self, camera, time_val, player=None):
         remaining = []
         for p in self.particles:
             p["life"] -= 0.016

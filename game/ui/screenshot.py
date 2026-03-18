@@ -275,6 +275,95 @@ class ScreenshotManager:
 
 
 # ================================================================
+# VIDEO RECORDING — capture frames and encode to MP4 via ffmpeg
+# ================================================================
+
+class VideoRecorder:
+    """Record gameplay as MP4 video using frame capture + ffmpeg.
+
+    Usage:
+        recorder = VideoRecorder(fps=30)
+        recorder.start("my_battle")
+        # game loop:
+        recorder.capture_frame(screen)
+        # when done:
+        path = recorder.stop()  # returns path to MP4
+    """
+
+    def __init__(self, fps: int = 30, export_dir: str = None):
+        self.fps = fps
+        self.export_dir = export_dir or os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(
+                os.path.abspath(__file__)))), "exports", "recordings")
+        self.recording = False
+        self._frame_dir = ""
+        self._frame_count = 0
+        self._filename = ""
+
+    def start(self, name: str = "recording"):
+        """Begin recording. Frames are saved to a temp directory."""
+        import tempfile
+        _ensure_dir(self.export_dir)
+        self._frame_dir = tempfile.mkdtemp(prefix=f"rec_{name}_")
+        self._frame_count = 0
+        self._filename = name
+        self.recording = True
+
+    def capture_frame(self, screen: pygame.Surface):
+        """Capture one frame. Call once per game loop iteration."""
+        if not self.recording:
+            return
+        path = os.path.join(self._frame_dir, f"frame_{self._frame_count:06d}.png")
+        pygame.image.save(screen, path)
+        self._frame_count += 1
+
+    def stop(self) -> str:
+        """Stop recording and encode to MP4. Returns path to video file."""
+        if not self.recording:
+            return ""
+        self.recording = False
+
+        if self._frame_count == 0:
+            return ""
+
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_path = os.path.join(self.export_dir,
+                                    f"{self._filename}_{ts}.mp4")
+
+        # Encode with ffmpeg
+        import subprocess
+        frame_pattern = os.path.join(self._frame_dir, "frame_%06d.png")
+        cmd = [
+            "ffmpeg", "-y",
+            "-framerate", str(self.fps),
+            "-i", frame_pattern,
+            "-c:v", "libx264",
+            "-pix_fmt", "yuv420p",
+            "-crf", "23",
+            "-preset", "fast",
+            output_path,
+        ]
+        try:
+            subprocess.run(cmd, capture_output=True, timeout=120)
+        except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+            print(f"ffmpeg encoding failed: {e}")
+            return ""
+
+        # Clean up frame directory
+        import shutil
+        try:
+            shutil.rmtree(self._frame_dir)
+        except OSError:
+            pass
+
+        return output_path
+
+    @property
+    def frame_count(self) -> int:
+        return self._frame_count
+
+
+# ================================================================
 # HEADLESS GAME — full rendering pipeline without interactive init
 # ================================================================
 

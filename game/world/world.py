@@ -175,6 +175,10 @@ class World:
         # Generate regions and settlements
         self._generate_regions_and_settlements(rng)
 
+        # Place colosseum on test island AFTER all world gen so nothing overwrites it
+        if hasattr(self, '_test_colosseum_pos'):
+            self._build_test_colosseum(*self._test_colosseum_pos)
+
         # Build set of building interior tiles (for blocking overworld entry)
         self._building_interior_tiles = set()
         for s in self.structures:
@@ -584,10 +588,10 @@ class World:
         # The continent is centered at (width//2, height//2) with edge falloff
         # creating water around the borders. We place the island near the
         # top-right corner where it's guaranteed to be ocean.
-        island_w, island_h = 120, 80
-        # Center: 90% across in X, 10% down in Y — deep in the ocean corner
-        ix = int(self.width * 0.90)
-        iy = int(self.height * 0.10)
+        island_w, island_h = 200, 120
+        # Center: 92% across in X, 7% down in Y — far corner of the ocean
+        ix = int(self.width * 0.92)
+        iy = int(self.height * 0.07)
 
         # Clamp so the island fits within world bounds with a water buffer
         buf = 10
@@ -636,6 +640,9 @@ class World:
         temple_x = ix - island_w // 2 + 20  # 20 tiles in from western edge
         temple_y = iy                        # vertically centered
         self._build_spawn_temple_minimal(temple_x, temple_y)
+
+        # Colosseum is placed after all world gen — see end of _generate()
+        self._test_colosseum_pos = (ix + 40, iy)
 
         self.test_island_spawn = (temple_x, temple_y)
 
@@ -712,6 +719,34 @@ class World:
 
         temple = Structure("Temple of Testing", "temple", cx, cy, radius=r)
         self.structures.append(temple)
+
+    def _build_test_colosseum(self, cx: int, cy: int):
+        """Stamp the colosseum blueprint onto the test island."""
+        from game.world.blueprint_library import ENTERTAINMENT
+        from game.world.buildings import stamp_blueprint
+
+        colosseum_bp = ENTERTAINMENT[0]  # The grand Colosseum
+        bw, bh = colosseum_bp.width, colosseum_bp.height
+
+        # Clear entire blueprint footprint plus generous surround to sand
+        # so no world-gen terrain peeks through the elliptical exterior gaps
+        margin = 20
+        for dy in range(-bh // 2 - margin, bh // 2 + margin + 1):
+            for dx in range(-bw // 2 - margin, bw // 2 + margin + 1):
+                nx, ny = cx + dx, cy + dy
+                if 0 <= nx < self.width and 0 <= ny < self.height:
+                    # Force to sand — overwrite everything including resources
+                    self.tiles[ny][nx] = SAND
+
+        # Stamp the blueprint
+        stamp_x = cx - bw // 2
+        stamp_y = cy - bh // 2
+        stamp_blueprint(self.tiles, colosseum_bp, stamp_x, stamp_y,
+                        self.width, self.height)
+
+        colosseum = Structure("Test Colosseum", "colosseum", cx, cy,
+                              radius=max(bw, bh) // 2)
+        self.structures.append(colosseum)
 
     def _place_ruins_and_shrines(self, rng: random.Random):
         """Place ruins and shrines in wilderness areas."""

@@ -208,7 +208,7 @@ def _stamp_special_locations(chunk: Chunk, plan, x0: int, y0: int,
 
     # Which kinds go before vs after settlements
     before_kinds = {"test_island", "temple", "ruins"}
-    after_kinds = {"test_building"}
+    after_kinds = {"test_building", "colosseum"}
 
     wanted = before_kinds if before_settlements else after_kinds
 
@@ -227,11 +227,13 @@ def _stamp_special_locations(chunk: Chunk, plan, x0: int, y0: int,
             _stamp_test_building(tiles, loc, x0, y0)
         elif loc.kind == "ruins":
             _stamp_ruins(tiles, loc, x0, y0, plan.seed)
+        elif loc.kind == "colosseum":
+            _stamp_colosseum(tiles, loc, x0, y0)
 
 
 def _stamp_test_island(tiles, loc, x0: int, y0: int, plan):
     """Carve the test island: ocean buffer + sand ellipse."""
-    island_w, island_h = 120, 80
+    island_w, island_h = 200, 120
     ix, iy = loc.x, loc.y
     rx, ry = island_w / 2.0, island_h / 2.0
 
@@ -251,6 +253,107 @@ def _stamp_test_island(tiles, loc, x0: int, y0: int, plan):
                     tiles[ly, lx] = SAND  # fringe
                 elif abs(dx) <= rx + 8 and abs(dy) <= ry + 8:
                     tiles[ly, lx] = WATER
+
+
+def _stamp_colosseum(tiles, loc, x0: int, y0: int):
+    """Stamp the grand colosseum — elliptical arena with tiered seating."""
+
+    cx, cy = loc.x, loc.y
+    bw, bh = 70, 55
+    rx_out = bw / 2.0 - 1
+    ry_out = bh / 2.0 - 1
+    rx_col = rx_out - 3
+    ry_col = ry_out - 3
+    rx_seat = rx_out - 7
+    ry_seat = ry_out - 7
+    rx_court = rx_out - 11
+    ry_court = ry_out - 11
+    rx_arena = rx_out - 15
+    ry_arena = ry_out - 15
+
+    for ly in range(CHUNK_SIZE):
+        wy = y0 + ly
+        for lx in range(CHUNK_SIZE):
+            wx = x0 + lx
+            dx = wx - cx
+            dy = wy - cy
+
+            # Clear area around colosseum to sand
+            if abs(dx) <= bw // 2 + 20 and abs(dy) <= bh // 2 + 20:
+                d_out = (dx / rx_out) ** 2 + (dy / ry_out) ** 2 if rx_out > 0 else 99
+
+                if d_out > 1.0:
+                    # Outside building — ensure sand (not terrain)
+                    if abs(dx) <= bw // 2 + 15 and abs(dy) <= bh // 2 + 15:
+                        tiles[ly, lx] = SAND
+                    continue
+                elif d_out > 0.95:
+                    tiles[ly, lx] = WALL
+                elif (dx / rx_col) ** 2 + (dy / ry_col) ** 2 > 1.0:
+                    tiles[ly, lx] = FLOOR  # colonnade
+                elif (dx / rx_col) ** 2 + (dy / ry_col) ** 2 > 0.92:
+                    tiles[ly, lx] = WALL  # inner wall
+                elif (dx / rx_seat) ** 2 + (dy / ry_seat) ** 2 > 1.0:
+                    tiles[ly, lx] = FLOOR  # seating
+                elif (dx / rx_court) ** 2 + (dy / ry_court) ** 2 > 1.0:
+                    tiles[ly, lx] = WALL  # arena wall
+                elif (dx / rx_arena) ** 2 + (dy / ry_arena) ** 2 > 1.0:
+                    tiles[ly, lx] = COURTYARD
+                else:
+                    tiles[ly, lx] = ARENA_SAND
+
+    # Place pillars in colonnade
+    for angle_deg in range(0, 360, 8):
+        a = math.radians(angle_deg)
+        px = int(cx + (rx_out - 2) * math.cos(a))
+        py = int(cy + (ry_out - 2) * math.sin(a))
+        lx, ly = px - x0, py - y0
+        if 0 <= lx < CHUNK_SIZE and 0 <= ly < CHUNK_SIZE:
+            if tiles[ly, lx] == FLOOR:
+                tiles[ly, lx] = PILLAR
+
+    # Grand entrance (south)
+    for ddx in range(-3, 4):
+        lx = (cx + ddx) - x0
+        ly_s = (cy + int(ry_out) - 1) - y0
+        if 0 <= lx < CHUNK_SIZE and 0 <= ly_s < CHUNK_SIZE:
+            tiles[ly_s, lx] = DOOR
+
+    # Secondary entrances (north, east, west)
+    for ddx in range(-2, 3):
+        lx = (cx + ddx) - x0
+        ly_n = (cy - int(ry_out) + 1) - y0
+        if 0 <= lx < CHUNK_SIZE and 0 <= ly_n < CHUNK_SIZE:
+            tiles[ly_n, lx] = DOOR
+    for ddy in range(-2, 3):
+        ly = (cy + ddy) - y0
+        lx_w = (cx - int(rx_out) + 1) - x0
+        lx_e = (cx + int(rx_out) - 1) - x0
+        if 0 <= ly < CHUNK_SIZE:
+            if 0 <= lx_w < CHUNK_SIZE:
+                tiles[ly, lx_w] = DOOR
+            if 0 <= lx_e < CHUNK_SIZE:
+                tiles[ly, lx_e] = DOOR
+
+    # Arena gates (iron gates)
+    arena_n = cy - int(ry_court) + 1
+    arena_s = cy + int(ry_court) - 1
+    for ddx in range(-1, 2):
+        for ay in [arena_n, arena_s]:
+            lx = (cx + ddx) - x0
+            ly = ay - y0
+            if 0 <= lx < CHUNK_SIZE and 0 <= ly < CHUNK_SIZE:
+                tiles[ly, lx] = IRON_GATE
+
+    # Side archways into arena
+    arena_w = cx - int(rx_court) + 1
+    arena_e = cx + int(rx_court) - 1
+    for ddy in range(-1, 2):
+        for ax in [arena_w, arena_e]:
+            lx = ax - x0
+            ly = (cy + ddy) - y0
+            if 0 <= lx < CHUNK_SIZE and 0 <= ly < CHUNK_SIZE:
+                tiles[ly, lx] = ARCHWAY
 
 
 def _stamp_temple(tiles, loc, x0: int, y0: int):

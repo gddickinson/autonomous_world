@@ -44,7 +44,11 @@ from game.ui.claude_chat import ClaudeChatUI, APIKeyConfigUI
 from game.core.remote_player import RemotePlayer
 
 
-class Game:
+from game.main_dialog_results import DialogResultsMixin
+from game.main_multiplayer import MultiplayerMixin
+
+
+class Game(DialogResultsMixin, MultiplayerMixin):
     """Main game class - orchestrates all systems."""
 
     def __init__(self):

@@ -2131,6 +2131,7 @@ class Game(DialogResultsMixin, MultiplayerMixin):
                 r.draw_farm_overlays(self.world, self.camera)
             r.draw_ground_items(self.world_mgr.ground_items, self.camera)
 
+            r._last_dt = dt
             r.draw_creatures(self.world_mgr.creatures, self.camera, self.visible_tiles)
             r.draw_npcs(self.world_mgr.npcs, self.camera, self.player, self.visible_tiles)
             r.draw_player(self.player, self.camera)

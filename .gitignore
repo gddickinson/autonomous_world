@@ -8,3 +8,5 @@
 /game/systems/__pycache__
 /game/ui/__pycache__
 /game/world/__pycache__
+/game/ui/creatures/__pycache__
+/viewers/__pycache__

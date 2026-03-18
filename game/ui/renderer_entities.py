@@ -5,6 +5,10 @@ import random
 import math
 from game.settings import *
 from game.core.player import Player
+from game.ui.character_anim import (
+    get_anim, update_anim, draw_npc_body, draw_creature_body
+)
+from game.ui.player_anim import draw_player_body
 
 
 class RendererEntitiesMixin:
@@ -32,7 +36,7 @@ class RendererEntitiesMixin:
                                 (int(sx) - isz, int(sy) - isz, isz * 2, isz * 2), 1)
 
     def draw_player(self, player: Player, camera: Camera):
-        """Draw the player character with mode-specific visuals."""
+        """Draw the player character with NPC-style body parts."""
         sx, sy = camera.world_to_screen(player.x, player.y)
 
         # Offset player sprite when on a non-ground floor
@@ -40,74 +44,16 @@ class RendererEntitiesMixin:
         if cur_floor != 0 and getattr(player, '_current_building_rect', None):
             pixels_per_floor = TILE_SIZE // 2
             sy += -cur_floor * pixels_per_floor
+
         s = max(1, TILE_SIZE // 4)
-        mode = getattr(player, 'mode', 'mortal')
+        player._last_dt = getattr(self, '_last_dt', 0.016)
+        draw_player_body(self.screen, player, int(sx), int(sy), s)
 
-        if mode == "ghost":
-            # Ghost: translucent blue-white, floaty
-            ghost_surf = pygame.Surface((s * 8, s * 10), pygame.SRCALPHA)
-            bw, bh = s * 5, s * 6
-            # Wavy ghost body
-            import math as _m
-            wave = int(_m.sin(pygame.time.get_ticks() * 0.005) * s)
-            pygame.draw.ellipse(ghost_surf, (150, 170, 220, 120),
-                               (s + wave, s, bw, bh))
-            # Ghost head
-            pygame.draw.circle(ghost_surf, (200, 210, 240, 150),
-                              (s * 4, s * 2), max(2, s * 2))
-            # Ghost eyes
-            pygame.draw.circle(ghost_surf, (100, 150, 255, 200),
-                              (s * 3, s * 2), max(1, s // 2))
-            pygame.draw.circle(ghost_surf, (100, 150, 255, 200),
-                              (s * 5, s * 2), max(1, s // 2))
-            self.screen.blit(ghost_surf, (int(sx) - s * 4, int(sy) - s * 5))
-            # Ghost selection circle
-            pygame.draw.circle(self.screen, (150, 150, 255), (int(sx), int(sy)), max(3, s * 3), 1)
-            return
-
-        if mode == "god":
-            # God: golden glow, radiant
-            bw, bh = s * 5, s * 6
-            # Golden aura
-            aura_surf = pygame.Surface((s * 14, s * 14), pygame.SRCALPHA)
-            pygame.draw.circle(aura_surf, (255, 220, 100, 30), (s * 7, s * 7), s * 7)
-            pygame.draw.circle(aura_surf, (255, 240, 150, 50), (s * 7, s * 7), s * 5)
-            self.screen.blit(aura_surf, (int(sx) - s * 7, int(sy) - s * 7))
-            # Body (golden)
-            body_rect = pygame.Rect(int(sx) - bw // 2, int(sy) - bh // 2 - s, bw, bh)
-            pygame.draw.rect(self.screen, (200, 180, 60), body_rect, border_radius=max(1, s))
-            pygame.draw.rect(self.screen, (255, 230, 100), body_rect, 1, border_radius=max(1, s))
-            # Head (golden)
-            pygame.draw.circle(self.screen, (255, 240, 180), (int(sx), int(sy) - bh // 2 - s), max(2, s * 2))
-            # Crown
-            for dx in [-s, 0, s]:
-                pygame.draw.line(self.screen, (255, 215, 0),
-                                (int(sx) + dx, int(sy) - bh // 2 - s * 2),
-                                (int(sx) + dx, int(sy) - bh // 2 - s * 3), max(1, s // 2))
-            pygame.draw.circle(self.screen, (255, 215, 0), (int(sx), int(sy)), max(3, s * 3), 1)
-            return
-
-        # Normal mortal rendering
-        bw, bh = s * 5, s * 6
-        body_rect = pygame.Rect(int(sx) - bw // 2, int(sy) - bh // 2 - s, bw, bh)
-        pygame.draw.rect(self.screen, (60, 100, 180), body_rect, border_radius=max(1, s))
-        pygame.draw.rect(self.screen, (80, 130, 220), body_rect, 1, border_radius=max(1, s))
-
-        # Head
-        pygame.draw.circle(self.screen, (220, 190, 160), (int(sx), int(sy) - bh // 2 - s), max(2, s * 2))
-
-        # Weapon indicator when attacking + swing arc
-        if player.attack_timer > PLAYER_ATTACK_COOLDOWN * 0.5:
+        # Spawn swing arc on attack (renderer-specific effect)
+        attack_timer = getattr(player, 'attack_timer', 0)
+        if attack_timer > PLAYER_ATTACK_COOLDOWN * 0.9:
             fx, fy = player.facing
-            wx = int(sx + fx * s * 4)
-            wy = int(sy + fy * s * 4 - s * 2)
-            pygame.draw.line(self.screen, YELLOW, (int(sx), int(sy) - s * 2), (wx, wy), max(1, s // 2))
-            # Spawn swing arc on first frame of attack
-            if player.attack_timer > PLAYER_ATTACK_COOLDOWN * 0.9:
-                self.spawn_swing_arc(player.x, player.y, fx, fy)
-
-        # Selection indicator
-        pygame.draw.circle(self.screen, (100, 200, 255), (int(sx), int(sy)), max(3, s * 3), 1)
+            self.spawn_swing_arc(player.x, player.y, fx, fy)
 
     def draw_npcs(self, npcs: list, camera: Camera, player: Player, visible_tiles=None):
         """Draw NPCs (only if in player's field of view)."""
@@ -121,15 +67,11 @@ class RendererEntitiesMixin:
                     -TILE_SIZE < sy < SCREEN_HEIGHT + TILE_SIZE):
                 continue
 
-            # Body (scaled to tile size)
-            color = npc.color
+            # Animated body parts
             s = max(1, TILE_SIZE // 4)
             bw, bh = s * 4, s * 5
-            body_rect = pygame.Rect(int(sx) - bw // 2, int(sy) - bh // 2, bw, bh)
-            pygame.draw.rect(self.screen, color, body_rect, border_radius=max(1, s))
-
-            # Head
-            pygame.draw.circle(self.screen, (210, 185, 155), (int(sx), int(sy) - bh // 2 - 1), max(2, s + 1))
+            update_anim(npc, getattr(self, '_last_dt', 0.016))
+            draw_npc_body(self.screen, npc, int(sx), int(sy), s)
 
             # Consciousness glow
             if npc.consciousness > 0:
@@ -228,56 +170,8 @@ class RendererEntitiesMixin:
                 bang = self.font_sm.render("!", True, RED)
                 self.screen.blit(bang, (int(sx) - 3, int(sy) - 39))
 
-            # Equipment visual indicators
-            char_class = getattr(npc, 'char_class', '')
-            npc_gold = getattr(npc, 'npc_gold', 0)
-
-            # Armed NPCs (soldiers, guards, fighters): small weapon line
-            armed_classes = {"Fighter", "Paladin", "Barbarian", "Ranger", "Rogue"}
-            armed_professions = {"Guard", "Soldier", "Ranger", "Knight", "Mercenary"}
-            if char_class in armed_classes or npc.profession in armed_professions:
-                # Draw a small sword/weapon line to the right of the NPC
-                wx1 = int(sx) + bw // 2 + 1
-                wy1 = int(sy) - bh // 4
-                wx2 = wx1 + max(2, s)
-                wy2 = wy1 - max(3, s + 2)
-                pygame.draw.line(self.screen, (190, 190, 200), (wx1, wy1), (wx2, wy2), max(1, s // 3))
-                # Small crossguard
-                pygame.draw.line(self.screen, (160, 160, 170),
-                                (wx2 - max(1, s // 2), wy2 + 1),
-                                (wx2 + max(1, s // 2), wy2 + 1), 1)
-
-            # Armored NPCs: metallic tint overlay on body
-            armored_classes = {"Fighter", "Paladin", "Barbarian"}
-            armored_professions = {"Guard", "Soldier", "Knight"}
-            if char_class in armored_classes or npc.profession in armored_professions:
-                armor_tint = pygame.Surface((bw, bh), pygame.SRCALPHA)
-                armor_tint.fill((180, 190, 210, 35))
-                self.screen.blit(armor_tint, (int(sx) - bw // 2, int(sy) - bh // 2))
-
-            # Mages: colored sparkle dot indicating magic school
-            mage_classes = {"Wizard", "Sorcerer", "Warlock", "Cleric", "Druid", "Bard"}
-            if char_class in mage_classes:
-                mage_colors = {
-                    "Wizard": (80, 120, 220),    # blue
-                    "Sorcerer": (200, 80, 200),  # magenta
-                    "Warlock": (140, 60, 180),   # dark purple
-                    "Cleric": (220, 200, 100),   # gold
-                    "Druid": (80, 180, 80),      # green
-                    "Bard": (200, 140, 200),     # pink
-                }
-                sparkle_color = mage_colors.get(char_class, (140, 140, 220))
-                # Draw a small glowing dot above-left of head
-                spark_x = int(sx) - max(2, s)
-                spark_y = int(sy) - bh // 2 - max(2, s)
-                # Outer glow
-                glow = pygame.Surface((8, 8), pygame.SRCALPHA)
-                pygame.draw.circle(glow, (*sparkle_color, 80), (4, 4), 4)
-                self.screen.blit(glow, (spark_x - 4, spark_y - 4))
-                # Inner bright dot
-                pygame.draw.circle(self.screen, sparkle_color, (spark_x, spark_y), max(1, s // 3))
-
             # Rich NPCs: gold-tinted name
+            npc_gold = getattr(npc, 'npc_gold', 0)
             if npc_gold > 100 and dist < 6:
                 # Re-draw name with gold tint (overwrites the white name drawn above)
                 name_surf = self.font_sm.render(npc.name, True, (255, 215, 80))
@@ -325,77 +219,10 @@ class RendererEntitiesMixin:
                     -TILE_SIZE < sy < SCREEN_HEIGHT + TILE_SIZE):
                 continue
 
-            # Body - scale-aware creature rendering
-            color = creature.color
-            s = max(1, TILE_SIZE // 4)  # scale factor
-            ix, iy = int(sx), int(sy)
-            cr = getattr(creature, 'cr', 0.25)
-            # Size scales with CR
-            size_mult = 1.0 + min(1.5, cr * 0.3)
-            cs = max(2, int(s * size_mult))
-
-            # Beast shape (wolf, bear, boar, dire_wolf)
-            beast_types = {"wolf", "bear", "boar", "dire_wolf", "owlbear", "wild_boar"}
-            passive_types = {"deer", "rabbit", "chicken", "cow", "pig", "sheep", "goat",
-                            "horse", "elk", "pheasant", "fox", "fish_school"}
-            humanoid_types = {"bandit", "goblin", "orc", "gnoll", "bugbear", "skeleton",
-                              "zombie", "kobold", "hobgoblin"}
-            large_types = {"ogre", "troll", "hill_giant", "minotaur", "young_dragon"}
-
-            if creature.kind in passive_types:
-                # Passive animals: friendly oval shape, brown eyes
-                pygame.draw.ellipse(self.screen, color,
-                                   (ix - cs * 2, iy - cs, cs * 4, cs * 2))
-                # Friendly brown eyes instead of red
-                pygame.draw.circle(self.screen, (60, 40, 20), (ix - cs, iy - cs // 2), max(1, cs // 3))
-                pygame.draw.circle(self.screen, (60, 40, 20), (ix + cs, iy - cs // 2), max(1, cs // 3))
-            elif creature.kind in beast_types:
-                pygame.draw.ellipse(self.screen, color,
-                                   (ix - cs * 2, iy - cs, cs * 4, cs * 2))
-                pygame.draw.circle(self.screen, RED, (ix - cs, iy - cs // 2), max(1, cs // 3))
-                pygame.draw.circle(self.screen, RED, (ix + cs, iy - cs // 2), max(1, cs // 3))
-            elif creature.kind in humanoid_types:
-                bw, bh = cs * 3, cs * 4
-                pygame.draw.rect(self.screen, color,
-                                (ix - bw // 2, iy - bh // 2, bw, bh), border_radius=max(1, cs // 2))
-                pygame.draw.circle(self.screen, (min(255, color[0] + 30), min(255, color[1] + 20), min(255, color[2] + 10)),
-                                  (ix, iy - bh // 2 - 1), max(1, cs))
-            elif creature.kind in large_types:
-                bw, bh = cs * 5, cs * 5
-                pygame.draw.ellipse(self.screen, color,
-                                   (ix - bw // 2, iy - bh // 2, bw, bh))
-                pygame.draw.circle(self.screen, RED, (ix - cs, iy - cs), max(1, cs // 2))
-                pygame.draw.circle(self.screen, RED, (ix + cs, iy - cs), max(1, cs // 2))
-            elif creature.kind == "spider":
-                pygame.draw.circle(self.screen, color, (ix, iy), max(2, cs))
-                for angle in range(0, 360, 45):
-                    rad = math.radians(angle)
-                    lx = int(ix + math.cos(rad) * cs * 2)
-                    ly = int(iy + math.sin(rad) * cs * 2)
-                    pygame.draw.line(self.screen, color, (ix, iy), (lx, ly), 1)
-            else:
-                # Default: simple oval
-                pygame.draw.ellipse(self.screen, color,
-                                   (ix - cs * 2, iy - cs, cs * 4, cs * 2))
-
-            # Kind initial letter for identification
-            if cs >= 3 and not hasattr(self, '_creature_font'):
-                self._creature_font = pygame.font.SysFont("monospace", 9, bold=True)
-            if cs >= 3 and hasattr(self, '_creature_font'):
-                initial = creature.kind[0].upper()
-                letter = self._creature_font.render(initial, True, WHITE)
-                self.screen.blit(letter, (ix - letter.get_width() // 2,
-                                          iy - letter.get_height() // 2))
-
-            # HP bar (if damaged)
-            if creature.hp < creature.max_hp:
-                bar_w = max(8, cs * 5)
-                bar_h = max(2, cs // 2)
-                bar_x = ix - bar_w // 2
-                bar_y = iy - cs * 3
-                pygame.draw.rect(self.screen, DARK_GRAY, (bar_x, bar_y, bar_w, bar_h))
-                hp_w = int(bar_w * creature.hp / creature.max_hp)
-                pygame.draw.rect(self.screen, RED, (bar_x, bar_y, hp_w, bar_h))
+            # Animated creature body
+            s = max(1, TILE_SIZE // 4)
+            update_anim(creature, getattr(self, '_last_dt', 0.016))
+            draw_creature_body(self.screen, creature, int(sx), int(sy), s)
 
     def _draw_npc_needs(self, npc, sx: int, sy: int):
         """Draw small need indicators above NPC when they're low."""

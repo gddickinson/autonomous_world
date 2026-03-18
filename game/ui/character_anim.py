@@ -1,0 +1,499 @@
+"""Procedural character animation — body parts, walk cycles, combat poses, death."""
+
+import math
+import pygame
+from game.settings import TILE_SIZE
+
+_sin = math.sin
+_cos = math.cos
+_sqrt = math.sqrt
+_tau = math.tau
+
+# ── Skin tones by race ──────────────────────────────────────────────────
+SKIN_TONES = {
+    "human":    (210, 185, 155),
+    "elf":      (220, 205, 175),
+    "dwarf":    (195, 165, 130),
+    "halfling": (215, 190, 155),
+    "gnome":    (210, 195, 165),
+    "half-orc": (140, 160, 120),
+    "orc":      (120, 145, 100),
+    "tiefling": (180, 130, 130),
+    "goblin":   (130, 150, 90),
+    "dragonborn": (160, 170, 150),
+}
+
+# ── Equipment colors ────────────────────────────────────────────────────
+ARMOR_TINTS = {
+    "Fighter":   (170, 175, 185),
+    "Paladin":   (190, 195, 210),
+    "Barbarian": (140, 120, 100),
+    "Ranger":    (100, 130, 90),
+    "Rogue":     (70, 70, 80),
+    "Knight":    (170, 175, 185),
+    "Guard":     (150, 155, 165),
+    "Soldier":   (145, 150, 160),
+}
+
+# ── Race sizes (module-level, not rebuilt per call) ──────────────────────
+_RACE_SIZES = {
+    "halfling": 0.7, "gnome": 0.7, "goblin": 0.7,
+    "dwarf": 0.85,
+    "human": 1.0, "elf": 1.0, "half-elf": 1.0, "tiefling": 1.0,
+    "dragonborn": 1.15,
+    "half-orc": 1.15, "orc": 1.2,
+    "goliath": 1.3,
+}
+
+# ── Creature type sets (module-level) ───────────────────────────────────
+_PASSIVE_TYPES = frozenset({"deer", "rabbit", "chicken", "cow", "pig", "sheep",
+                            "goat", "horse", "elk", "pheasant", "fox", "fish_school"})
+_BEAST_TYPES = frozenset({"wolf", "bear", "boar", "dire_wolf", "owlbear", "wild_boar"})
+_HUMANOID_TYPES = frozenset({"bandit", "goblin", "orc", "gnoll", "bugbear", "skeleton",
+                             "zombie", "kobold", "hobgoblin"})
+_LARGE_TYPES = frozenset({"ogre", "troll", "hill_giant", "minotaur", "young_dragon"})
+
+# ── Armed/mage sets (module-level) ──────────────────────────────────────
+_ARMED_MELEE_CLASSES = frozenset({"Fighter", "Paladin", "Barbarian", "Rogue", "Ranger"})
+_ARMED_MELEE_PROFS = frozenset({"Guard", "Soldier", "Knight", "Mercenary"})
+_ARMED_RANGED = frozenset({"Ranger", "Archer"})
+_MAGE_CLASSES = frozenset({"Wizard", "Sorcerer", "Warlock", "Cleric", "Druid", "Bard"})
+_ARMORED_CLASSES = frozenset({"Fighter", "Paladin", "Barbarian"})
+_ARMORED_PROFS = frozenset({"Guard", "Soldier", "Knight"})
+
+_MAGE_ORB_COLORS = {
+    "Wizard": (80, 120, 220), "Sorcerer": (200, 80, 200),
+    "Warlock": (140, 60, 180), "Cleric": (220, 200, 100),
+    "Druid": (80, 180, 80), "Bard": (200, 140, 200),
+}
+
+_EYE_COLOR = (40, 40, 40)
+_RED_EYE = (200, 40, 40)
+_BROWN_EYE = (60, 40, 20)
+
+# ── Color cache ─────────────────────────────────────────────────────────
+_darken_cache = {}
+_lighten_cache = {}
+
+
+def _darken(color, amount=30):
+    key = (color, amount)
+    cached = _darken_cache.get(key)
+    if cached is not None:
+        return cached
+    result = (max(0, color[0] - amount), max(0, color[1] - amount),
+              max(0, color[2] - amount))
+    _darken_cache[key] = result
+    return result
+
+
+def _lighten(color, amount=30):
+    key = (color, amount)
+    cached = _lighten_cache.get(key)
+    if cached is not None:
+        return cached
+    result = (min(255, color[0] + amount), min(255, color[1] + amount),
+              min(255, color[2] + amount))
+    _lighten_cache[key] = result
+    return result
+
+
+def _get_skin(race: str) -> tuple:
+    return SKIN_TONES.get(race.lower() if race else "", (210, 185, 155))
+
+
+def _race_size(race: str) -> float:
+    return _RACE_SIZES.get(race.lower() if race else "", 1.0)
+
+
+# ── Spider leg precomputation ───────────────────────────────────────────
+_SPIDER_ANGLES = []
+for _a in range(0, 360, 45):
+    _r = math.radians(_a)
+    _SPIDER_ANGLES.append((math.cos(_r), math.sin(_r)))
+
+
+class AnimState:
+    """Lightweight per-entity animation state. Attached to entities as `_anim`."""
+    __slots__ = ('walk_phase', 'idle_phase', 'death_timer', 'death_done',
+                 'prev_x', 'prev_y', 'moving',
+                 '_cached_skin', '_cached_race_size', '_cached_colors')
+
+    def __init__(self):
+        self.walk_phase = 0.0
+        self.idle_phase = 0.0
+        self.death_timer = -1.0
+        self.death_done = False
+        self.prev_x = 0.0
+        self.prev_y = 0.0
+        self.moving = False
+        self._cached_skin = None
+        self._cached_race_size = None
+        self._cached_colors = None
+
+
+def get_anim(entity) -> AnimState:
+    """Get or create animation state for an entity."""
+    anim = getattr(entity, '_anim', None)
+    if anim is None:
+        anim = AnimState()
+        anim.prev_x = entity.x
+        anim.prev_y = entity.y
+        entity._anim = anim
+    return anim
+
+
+def update_anim(entity, dt: float):
+    """Update animation state based on entity movement and status."""
+    anim = get_anim(entity)
+
+    dx = entity.x - anim.prev_x
+    dy = entity.y - anim.prev_y
+    anim.moving = abs(dx) > 0.01 or abs(dy) > 0.01
+    anim.prev_x = entity.x
+    anim.prev_y = entity.y
+
+    if anim.moving:
+        speed = _sqrt(dx * dx + dy * dy) / max(dt, 0.001)
+        anim.walk_phase += dt * speed * 3.0
+        if anim.walk_phase > _tau:
+            anim.walk_phase -= _tau
+    else:
+        anim.walk_phase *= 0.85
+
+    anim.idle_phase += dt * 1.5
+    if anim.idle_phase > _tau:
+        anim.idle_phase -= _tau
+
+    if not entity.alive and anim.death_timer < 0:
+        anim.death_timer = 0.0
+    if anim.death_timer >= 0 and not anim.death_done:
+        anim.death_timer = min(1.0, anim.death_timer + dt * 2.0)
+        if anim.death_timer >= 1.0:
+            anim.death_done = True
+
+
+# ── NPC Drawing ─────────────────────────────────────────────────────────
+
+def draw_npc_body(screen, npc, sx: int, sy: int, s: int, mounted=False):
+    """Draw an NPC with assembled body parts and animation.
+
+    s = scale factor (TILE_SIZE // 4, usually 4).
+    mounted: if True, skip legs and lower torso position (rider mode).
+    """
+    anim = get_anim(npc)
+    body_color = npc.color
+
+    # Death: minimal draw
+    if anim.death_timer >= 0:
+        _draw_death(screen, npc, sx, sy, s, anim, body_color)
+        return
+
+    # Pose-based rendering for non-walking/standing actions
+    if not mounted:
+        from game.ui.poses import get_pose, draw_lying_body, draw_sitting_body, \
+            draw_kneeling_body, draw_working_body, draw_combat_body, \
+            draw_fishing_body, draw_alert_body, draw_status_overlay
+        pose = get_pose(npc)
+        race = getattr(npc, 'race', 'human')
+        skin = _get_skin(race)
+        _pose_funcs = {
+            "lying": draw_lying_body, "sitting": draw_sitting_body,
+            "kneeling": draw_kneeling_body, "working": draw_working_body,
+            "combat": draw_combat_body, "fishing": draw_fishing_body,
+            "alert": draw_alert_body,
+        }
+        if pose in _pose_funcs:
+            _pose_funcs[pose](screen, npc, sx, sy, s, body_color, skin)
+            draw_status_overlay(screen, npc, sx, sy, s)
+            return
+
+    # Cache per-entity derived values
+    if anim._cached_skin is None:
+        race = getattr(npc, 'race', 'human')
+        anim._cached_skin = _get_skin(race)
+        anim._cached_race_size = _race_size(race)
+        char_class = getattr(npc, 'char_class', '')
+        profession = getattr(npc, 'profession', '')
+        armored = char_class in _ARMORED_CLASSES or profession in _ARMORED_PROFS
+        armor_color = ARMOR_TINTS.get(char_class, ARMOR_TINTS.get(profession, None))
+        # Weapon type: 0=none, 1=melee, 2=ranged, 3=mage
+        if char_class in _ARMED_MELEE_CLASSES or profession in _ARMED_MELEE_PROFS:
+            weapon_type = 1
+        elif char_class in _ARMED_RANGED or profession in _ARMED_RANGED:
+            weapon_type = 2
+        elif char_class in _MAGE_CLASSES:
+            weapon_type = 3
+        else:
+            weapon_type = 0
+        orb_color = _MAGE_ORB_COLORS.get(char_class, (140, 140, 220))
+        anim._cached_colors = (char_class, profession, armored, armor_color,
+                               weapon_type, orb_color)
+
+    skin = anim._cached_skin
+    size_mult = anim._cached_race_size
+    char_class, profession, armored, armor_color, weapon_type, orb_color = anim._cached_colors
+
+    rs = max(1, int(s * size_mult))
+
+    # Walk swing — vertical offset simulates depth (front/back) in 2.5D
+    walk_sin = _sin(anim.walk_phase)
+    breath = _sin(anim.idle_phase) * 0.5
+    breath_offset = int(breath * 0.5)
+    head_bob = int(abs(_cos(anim.walk_phase)) * rs * 0.3) if anim.moving else 0
+
+    # Leg/arm vertical swing (pixels) — sliding up/down = closer/further
+    if anim.moving:
+        leg_swing = int(walk_sin * rs * 1.2)
+        arm_swing = int(-walk_sin * rs * 0.9)
+    else:
+        leg_swing = 0
+        arm_swing = 0
+
+    state = getattr(npc, 'state', 'idle')
+    fleeing = state == 'fleeing'
+    if fleeing:
+        leg_swing = int(leg_swing * 1.6)
+        arm_swing = int(arm_swing * 1.6)
+
+    torso_color = armor_color if armored and armor_color else body_color
+    dark_body = _darken(body_color, 20)
+    dark_body2 = _darken(body_color, 35)
+    dark_torso = _darken(torso_color, 25)
+
+    # Geometry
+    leg_w = max(1, rs)
+    leg_h = max(2, rs * 2)
+    torso_w = max(3, rs * 3)
+    torso_h = max(3, rs * 3)
+    torso_x = sx - torso_w // 2
+    torso_y = sy - rs + breath_offset
+    arm_w = max(1, rs)
+    arm_h = max(2, rs * 2)
+    arm_top = torso_y + max(1, rs // 2)
+    la_x = torso_x - arm_w
+    ra_x = torso_x + torso_w
+    head_r = max(2, rs + 1)
+    head_x = sx
+    head_y = torso_y - head_r + breath_offset - head_bob
+    hip_y = torso_y + torso_h
+
+    draw = pygame.draw
+
+    # ── Legs (skip when mounted — rider is sitting) ─────────────────
+    if not mounted:
+        lx = sx - rs
+        rx = sx + rs - leg_w
+        l_leg_y = hip_y + leg_swing + breath_offset
+        r_leg_y = hip_y - leg_swing + breath_offset
+        draw.rect(screen, dark_body, (lx, l_leg_y, leg_w, leg_h))
+        draw.rect(screen, dark_body, (rx, r_leg_y, leg_w, leg_h))
+        foot_h = max(1, rs // 2)
+        draw.rect(screen, dark_body2, (lx - 1, l_leg_y + leg_h, leg_w + 2, foot_h))
+        draw.rect(screen, dark_body2, (rx - 1, r_leg_y + leg_h, leg_w + 2, foot_h))
+
+    # ── Torso ──────────────────────────────────────────────────────
+    br = max(1, rs // 2)
+    draw.rect(screen, torso_color, (torso_x, torso_y, torso_w, torso_h),
+              border_radius=br)
+    if rs >= 3:
+        draw.rect(screen, dark_torso, (torso_x, torso_y, torso_w, torso_h),
+                  1, border_radius=br)
+
+    # ── Arms (rects sliding vertically from shoulders) ─────────────
+    l_arm_y = arm_top + arm_swing
+    r_arm_y = arm_top - arm_swing
+    if fleeing:
+        # Arms raised: draw shorter, higher up
+        draw.rect(screen, skin, (la_x, torso_y - rs, arm_w, arm_h // 2))
+        draw.rect(screen, skin, (ra_x, torso_y - rs, arm_w, arm_h // 2))
+        l_arm_y = torso_y - rs
+        r_arm_y = torso_y - rs
+    else:
+        draw.rect(screen, skin, (la_x, l_arm_y, arm_w, arm_h))
+        draw.rect(screen, skin, (ra_x, r_arm_y, arm_w, arm_h))
+
+    # ── Head ───────────────────────────────────────────────────────
+    draw.circle(screen, skin, (head_x, head_y), head_r)
+
+    # ── Eyes ───────────────────────────────────────────────────────
+    if rs >= 2:
+        eye_r = max(1, rs // 3)
+        fx, fy = getattr(npc, 'facing', (0, 1))
+        eox = int(fx * rs * 0.3)
+        eye_y = head_y - max(1, rs // 4) + int(fy * rs * 0.2)
+        draw.circle(screen, _EYE_COLOR, (head_x - eye_r - 1 + eox, eye_y), eye_r)
+        draw.circle(screen, _EYE_COLOR, (head_x + eye_r + 1 + eox, eye_y), eye_r)
+
+    # ── Hand positions (outer edge, bottom of arm) ─────────────────
+    r_hand_x = ra_x + arm_w
+    r_hand_y = r_arm_y + arm_h if not fleeing else torso_y - rs + arm_h // 2
+    l_hand_x = la_x
+    l_hand_y = l_arm_y + arm_h if not fleeing else torso_y - rs + arm_h // 2
+
+    # ── Equipment (conditional — most NPCs are civilians) ───────────
+    if weapon_type == 1:
+        _draw_melee(screen, draw, r_hand_x, r_hand_y, rs, npc)
+    elif weapon_type == 2:
+        _draw_bow(screen, draw, l_hand_x, l_hand_y, r_hand_x, r_hand_y, rs)
+    elif weapon_type == 3:
+        _draw_staff(screen, draw, r_hand_x, r_hand_y, rs, orb_color)
+
+    # ── Shield (angled opposite to sword, overlapping lower arm) ──
+    if armored and rs >= 2:
+        sh_len = max(4, rs * 3)     # shield height
+        sh_w = max(2, rs + 1)       # shield thickness for polygon
+        # Anchor near middle of left arm, tilted up-left (opposite to sword)
+        anchor_x = la_x + arm_w // 2 + max(1, rs // 2)
+        anchor_y = l_hand_y - max(1, rs // 2)
+        # Top of shield angles up and to the left
+        tilt_x = max(2, int(rs * 0.9))
+        top_x = anchor_x - tilt_x
+        top_y = anchor_y - sh_len
+        # Shield as angled polygon (4 corners with width)
+        hw = max(1, sh_w // 2)
+        pts = [
+            (top_x - hw, top_y),
+            (top_x + hw, top_y),
+            (anchor_x + hw, anchor_y),
+            (anchor_x - hw, anchor_y),
+        ]
+        draw.polygon(screen, (140, 100, 50), pts)
+        draw.polygon(screen, (110, 75, 35), pts, 1)
+        # Shield boss (center dot)
+        if rs >= 3:
+            boss_x = (top_x + anchor_x) // 2
+            boss_y = (top_y + anchor_y) // 2
+            draw.circle(screen, (170, 140, 70), (boss_x, boss_y),
+                        max(1, rs // 4))
+
+
+def _draw_melee(screen, draw, hx, hy, rs, npc):
+    """Draw sword angling up-and-out from the right hand."""
+    blade_len = max(3, rs * 2)
+    # Blade angles diagonally: up and to the right at ~30 degrees
+    tip_x = hx + max(2, int(rs * 1.2))
+    tip_y = hy - blade_len
+    # Blade
+    draw.line(screen, (195, 200, 210), (hx, hy), (tip_x, tip_y),
+              max(1, rs // 2))
+    # Crossguard perpendicular to blade at hand position
+    cg_len = max(2, rs)
+    draw.line(screen, (160, 160, 170),
+              (hx - max(1, cg_len // 3), hy - 1),
+              (hx + cg_len, hy + 1), max(1, rs // 3))
+    # Pommel extends opposite to blade
+    if rs >= 3:
+        pmx = hx - max(1, rs // 2)
+        pmy = hy + max(1, rs // 2)
+        draw.circle(screen, (140, 130, 110), (pmx, pmy), max(1, rs // 4))
+
+
+def _draw_bow(screen, draw, l_hx, l_hy, r_hx, r_hy, rs):
+    """Draw bow held in left hand with string to right hand."""
+    bow_h = max(4, rs * 3)
+    # Bow arc in left hand
+    bow_rect = (l_hx - rs, l_hy - bow_h // 2, rs * 2, bow_h)
+    draw.arc(screen, (140, 100, 50), bow_rect, -0.8, 0.8, max(1, rs // 3))
+    # Bowstring from top to bottom of arc
+    string_x = l_hx + max(1, rs // 2)
+    draw.line(screen, (180, 170, 150),
+              (string_x, l_hy - bow_h // 2 + 1),
+              (string_x, l_hy + bow_h // 2 - 1), 1)
+    # Arrow nocked (small line from string toward facing)
+    if rs >= 3:
+        draw.line(screen, (160, 140, 80),
+                  (string_x, l_hy),
+                  (string_x + max(2, rs), l_hy), 1)
+
+
+def _draw_staff(screen, draw, hx, hy, rs, orb_color):
+    """Draw staff extending from right hand upward, with orb at top."""
+    staff_len = max(4, rs * 3)
+    staff_top_y = hy - staff_len
+    # Staff shaft from hand upward
+    draw.line(screen, (120, 90, 50),
+              (hx, hy), (hx, staff_top_y), max(1, rs // 3))
+    # Orb at staff top
+    orb_r = max(2, rs // 2 + 1)
+    draw.circle(screen, orb_color, (hx, staff_top_y), orb_r)
+    # Orb glow
+    if rs >= 3:
+        glow = pygame.Surface((orb_r * 4, orb_r * 4), pygame.SRCALPHA)
+        pygame.draw.circle(glow, (*orb_color, 40), (orb_r * 2, orb_r * 2), orb_r * 2)
+        screen.blit(glow, (hx - orb_r * 2, staff_top_y - orb_r * 2))
+
+
+def _draw_death(screen, npc, sx, sy, s, anim, body_color):
+    """Draw death — collapse animation then skull and crossbones."""
+    t = anim.death_timer
+    race = getattr(npc, 'race', 'human')
+    rs = max(1, int(s * _race_size(race)))
+
+    if anim.death_done:
+        # Final state: skull and crossbones
+        _draw_skull(screen, sx, sy, rs)
+        return
+
+    # Collapse animation (t: 0→1)
+    squash_y = 1.0 - t * 0.7
+    stretch_x = 1.0 + t * 0.5
+    torso_w = max(3, int(rs * 3 * stretch_x))
+    torso_h = max(2, int(rs * 3 * squash_y))
+    torso_y = sy - rs + int(t * rs * 2)
+    alpha = max(40, int(255 * (1.0 - t * 0.6)))
+
+    surf = pygame.Surface((torso_w + 4, torso_h + 4), pygame.SRCALPHA)
+    pygame.draw.rect(surf, (*body_color, alpha), (2, 2, torso_w, torso_h),
+                     border_radius=max(1, rs // 2))
+    screen.blit(surf, (sx - torso_w // 2 - 2, torso_y - 2))
+
+
+def _draw_skull(screen, sx, sy, rs):
+    """Draw a small skull and crossbones icon."""
+    draw = pygame.draw
+    bone = (210, 200, 180)
+    dark = (160, 150, 130)
+
+    skull_r = max(2, rs + 1)
+
+    # Crossbones behind skull
+    bone_len = max(3, rs * 2)
+    bone_w = max(1, rs // 3)
+    draw.line(screen, bone,
+              (sx - bone_len, sy + skull_r // 2),
+              (sx + bone_len, sy - skull_r + 2), bone_w)
+    draw.line(screen, bone,
+              (sx - bone_len, sy - skull_r + 2),
+              (sx + bone_len, sy + skull_r // 2), bone_w)
+    # Bone knobs at ends
+    knob_r = max(1, rs // 3)
+    for bx, by in [(sx - bone_len, sy + skull_r // 2),
+                    (sx + bone_len, sy + skull_r // 2),
+                    (sx - bone_len, sy - skull_r + 2),
+                    (sx + bone_len, sy - skull_r + 2)]:
+        draw.circle(screen, bone, (bx, by), knob_r)
+
+    # Skull (rounded head shape)
+    draw.circle(screen, bone, (sx, sy - skull_r // 2), skull_r)
+    # Jaw (smaller arc below)
+    jaw_w = max(2, skull_r + rs // 2)
+    jaw_h = max(1, skull_r // 2)
+    draw.ellipse(screen, dark, (sx - jaw_w // 2, sy, jaw_w, jaw_h))
+
+    # Eye sockets (dark circles)
+    eye_r = max(1, rs // 2)
+    eye_y = sy - skull_r // 2 - 1
+    draw.circle(screen, (30, 25, 20), (sx - eye_r - 1, eye_y), eye_r)
+    draw.circle(screen, (30, 25, 20), (sx + eye_r + 1, eye_y), eye_r)
+
+    # Nose (small triangle/hole)
+    if rs >= 2:
+        nx = sx
+        ny = sy - 1
+        draw.polygon(screen, (40, 35, 25),
+                      [(nx, ny - max(1, rs // 3)), (nx - 1, ny + 1), (nx + 1, ny + 1)])
+
+
+# Re-export creature drawing from its own module for backward compatibility
+from game.ui.creature_anim import draw_creature_body  # noqa: F401

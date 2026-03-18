@@ -13,6 +13,9 @@ import pygame
 from typing import List, Tuple, Optional
 from game.settings import *
 from game.world.world import World
+from game.ui.character_anim import get_anim, update_anim, draw_npc_body, draw_creature_body
+from game.ui.player_anim import draw_player_body
+from game.ui.mount_render import is_mounted, draw_mounted_entity
 from game.world.camera import Camera
 from game.core.player import Player
 
@@ -778,47 +781,22 @@ class AdventureRenderer:
         T = self.tile_size
         sx, sy = camera.world_to_screen(player.x, player.y)
         ix, iy = int(sx), int(sy)
+        s = T // 4  # scale factor for body-part system (32//4 = 8)
 
-        is_ghost = getattr(player, 'ghost', False)
-        is_god = getattr(player, 'god', False)
+        player._last_dt = getattr(self, '_last_dt', 0.016)
+        update_anim(player, player._last_dt)
 
-        if is_god:
-            # Golden body with aura
-            aura = pygame.Surface((T * 2, T * 2), pygame.SRCALPHA)
-            pygame.draw.circle(aura, (255, 220, 80, 40), (T, T), T)
-            self.screen.blit(aura, (ix - T, iy - T))
-            body_color = (220, 190, 60)
-            head_color = (240, 210, 80)
-        elif is_ghost:
-            body_color = (120, 130, 180)
-            head_color = (150, 160, 210)
+        if is_mounted(player):
+            draw_mounted_entity(self.screen, player, ix, iy, s, draw_player_body)
         else:
-            body_color = (60, 100, 180)
-            head_color = (90, 140, 200)
-
-        # Body
-        bw, bh = 10, 14
-        pygame.draw.rect(self.screen, body_color,
-                        (ix - bw // 2, iy - bh // 2 + 2, bw, bh),
-                        border_radius=3)
-        # Head
-        pygame.draw.circle(self.screen, head_color, (ix, iy - bh // 2 - 2), 6)
-        # Eyes (facing)
-        fx, fy = getattr(player, 'facing', (0, 1))
-        ex = ix + int(fx * 2)
-        ey = iy - bh // 2 - 2 + int(fy * 2)
-        pygame.draw.circle(self.screen, (30, 30, 50), (ex, ey), 1)
-        # Weapon
-        if getattr(player, 'equipped_weapon', None):
-            wx = ix + int(fx * 8) + 5
-            wy = iy + int(fy * 5)
-            pygame.draw.line(self.screen, (180, 180, 180), (ix + 4, iy), (wx, wy), 2)
+            draw_player_body(self.screen, player, ix, iy, s)
 
     def draw_npcs(self, npcs, camera, player, visible_tiles=None):
         T = self.tile_size
+        s = T // 4  # scale factor (32//4 = 8)
+        dt = getattr(self, '_last_dt', 0.016)
+
         for npc in npcs:
-            if not npc.alive:
-                continue
             if visible_tiles and (int(npc.x), int(npc.y)) not in visible_tiles:
                 continue
             sx, sy = camera.world_to_screen(npc.x, npc.y)
@@ -826,17 +804,12 @@ class AdventureRenderer:
                 continue
 
             ix, iy = int(sx), int(sy)
-            color = npc.color
+            update_anim(npc, dt)
 
-            # Body
-            bw, bh = 8, 12
-            pygame.draw.rect(self.screen, color,
-                            (ix - bw // 2, iy - bh // 2 + 2, bw, bh),
-                            border_radius=2)
-            # Head
-            head_col = (min(255, color[0] + 30), min(255, color[1] + 25),
-                        min(255, color[2] + 15))
-            pygame.draw.circle(self.screen, head_col, (ix, iy - bh // 2 - 1), 5)
+            if is_mounted(npc):
+                draw_mounted_entity(self.screen, npc, ix, iy, s, draw_npc_body)
+            else:
+                draw_npc_body(self.screen, npc, ix, iy, s)
 
             # Name label (when close)
             if player and abs(npc.x - player.x) + abs(npc.y - player.y) < 8:
@@ -863,6 +836,9 @@ class AdventureRenderer:
 
     def draw_creatures(self, creatures, camera, visible_tiles=None):
         T = self.tile_size
+        s = T // 4  # scale factor (32//4 = 8)
+        dt = getattr(self, '_last_dt', 0.016)
+
         for creature in creatures:
             if not creature.alive:
                 continue
@@ -873,59 +849,8 @@ class AdventureRenderer:
                 continue
 
             ix, iy = int(sx), int(sy)
-            color = creature.color
-            cr = getattr(creature, 'cr', 0.25)
-            size = max(4, int(6 + min(10, cr * 3)))
-
-            # Shadow
-            shadow = pygame.Surface((size * 3, size), pygame.SRCALPHA)
-            pygame.draw.ellipse(shadow, (0, 0, 0, 40), (0, 0, size * 3, size))
-            self.screen.blit(shadow, (ix - size * 3 // 2, iy + size // 2))
-
-            # Body shape
-            passive = {"deer", "rabbit", "chicken", "cow", "pig", "sheep", "goat",
-                       "horse", "elk", "pheasant", "fox", "fish_school"}
-            humanoid = {"bandit", "goblin", "orc", "gnoll", "bugbear", "skeleton",
-                        "zombie", "kobold"}
-
-            if creature.kind in passive:
-                pygame.draw.ellipse(self.screen, color,
-                                   (ix - size, iy - size // 2, size * 2, size))
-                # Brown eyes
-                pygame.draw.circle(self.screen, (60, 40, 20), (ix - size // 3, iy - 2), 1)
-                pygame.draw.circle(self.screen, (60, 40, 20), (ix + size // 3, iy - 2), 1)
-            elif creature.kind in humanoid:
-                # Humanoid body + head
-                pygame.draw.rect(self.screen, color,
-                                (ix - size // 2, iy - size // 2, size, int(size * 1.3)),
-                                border_radius=2)
-                pygame.draw.circle(self.screen, (min(255, color[0] + 20),
-                                                  min(255, color[1] + 15),
-                                                  min(255, color[2] + 10)),
-                                   (ix, iy - size // 2 - 2), max(2, size // 3))
-            else:
-                pygame.draw.ellipse(self.screen, color,
-                                   (ix - size, iy - size // 2, size * 2, size))
-                # Red eyes for hostiles
-                if creature.kind not in passive:
-                    pygame.draw.circle(self.screen, RED, (ix - 2, iy - 2), 1)
-                    pygame.draw.circle(self.screen, RED, (ix + 2, iy - 2), 1)
-
-            # Kind initial
-            initial = creature.kind[0].upper()
-            letter = self._creature_font.render(initial, True, WHITE)
-            self.screen.blit(letter, (ix - letter.get_width() // 2,
-                                      iy - letter.get_height() // 2))
-
-            # HP bar
-            if creature.hp < creature.max_hp:
-                bar_w = max(12, size * 3)
-                bar_h = 3
-                bx = ix - bar_w // 2
-                by = iy - size - 5
-                pygame.draw.rect(self.screen, DARK_GRAY, (bx, by, bar_w, bar_h))
-                hp_w = int(bar_w * creature.hp / creature.max_hp)
-                pygame.draw.rect(self.screen, RED, (bx, by, hp_w, bar_h))
+            update_anim(creature, dt)
+            draw_creature_body(self.screen, creature, ix, iy, s)
 
     # ================================================================
     # SUPPORT METHODS (matching Renderer interface)

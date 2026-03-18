@@ -161,47 +161,70 @@ class Renderer3D:
         glEndList()
         return dl
 
+    def _load_3d_templates(self):
+        """Lazy-load 3D entity templates from viewers package."""
+        if hasattr(self, '_3d_loaded'):
+            return
+        import os, sys
+        viewers_dir = os.path.join(os.path.dirname(os.path.dirname(
+            os.path.dirname(os.path.abspath(__file__)))), 'viewers')
+        if viewers_dir not in sys.path:
+            sys.path.insert(0, os.path.dirname(viewers_dir))
+        try:
+            from viewers.poses_3d import draw_pose_3d
+            from viewers.creature_3d_templates import (
+                draw_quadruped_3d, draw_ungulate_3d, draw_bear_3d,
+                draw_humanoid_3d, draw_large_3d, draw_winged_3d,
+                draw_ethereal_3d, draw_arachnid_3d, draw_bird_3d,
+                draw_serpent_3d,
+            )
+            from viewers.creature_3d_templates_extra import (
+                draw_small_3d, draw_reptile_3d, draw_aquatic_3d,
+            )
+            self._draw_pose_3d = draw_pose_3d
+            self._creature_templates = {
+                "quadruped": draw_quadruped_3d, "ungulate": draw_ungulate_3d,
+                "bear": draw_bear_3d, "humanoid": draw_humanoid_3d,
+                "large": draw_large_3d, "winged": draw_winged_3d,
+                "ethereal": draw_ethereal_3d, "arachnid": draw_arachnid_3d,
+                "bird": draw_bird_3d, "serpent": draw_serpent_3d,
+                "small": draw_small_3d, "reptile": draw_reptile_3d,
+                "aquatic": draw_aquatic_3d,
+            }
+            from game.ui.creatures.configs import CREATURE_CONFIGS
+            self._creature_configs = CREATURE_CONFIGS
+            self._3d_loaded = True
+        except ImportError:
+            self._3d_loaded = False
+
     def draw_player(self, player, camera):
-        """Draw player as a yellow diamond at the origin."""
-        glDisable(GL_CULL_FACE)
-        size = 0.3
-        cx, cy, cz = 0.5, 0.5, 0.5
-
-        glBegin(GL_TRIANGLES)
-        # Top half (bright yellow)
-        glColor3f(0.9, 0.82, 0.25)
-        for v0, v1 in [
-            ((-size, 0, -size), (size, 0, -size)),
-            ((size, 0, -size), (size, 0, size)),
-            ((size, 0, size), (-size, 0, size)),
-            ((-size, 0, size), (-size, 0, -size)),
-        ]:
-            glVertex3f(cx + v0[0], cy + size * 2, cz + v0[2])
-            glVertex3f(cx + v0[0], cy, cz + v0[2])
-            glVertex3f(cx + v1[0], cy, cz + v1[2])
-
-        # Bottom half (darker)
-        glColor3f(0.7, 0.65, 0.2)
-        for v0, v1 in [
-            ((-size, 0, -size), (size, 0, -size)),
-            ((size, 0, -size), (size, 0, size)),
-            ((size, 0, size), (-size, 0, size)),
-            ((-size, 0, size), (-size, 0, -size)),
-        ]:
-            glVertex3f(cx, cy - size, cz)
-            glVertex3f(cx + v1[0], cy, cz + v1[2])
-            glVertex3f(cx + v0[0], cy, cz + v0[2])
-        glEnd()
+        """Draw player as 3D body parts at the origin."""
+        self._load_3d_templates()
+        if getattr(self, '_3d_loaded', False) and hasattr(self, '_draw_pose_3d'):
+            mode = getattr(player, 'mode', 'mortal')
+            glPushMatrix()
+            glTranslatef(0.5, 0, 0.5)
+            self._draw_pose_3d("standing", "Player", None, None, "human",
+                               (60, 100, 180), 0)
+            glPopMatrix()
+        else:
+            # Fallback diamond
+            glBegin(GL_TRIANGLES)
+            glColor3f(0.9, 0.82, 0.25)
+            s = 0.2
+            glVertex3f(0.5, 0.7, 0.3); glVertex3f(0.3, 0.1, 0.7); glVertex3f(0.7, 0.1, 0.7)
+            glEnd()
 
     def draw_creatures(self, creatures, camera, visible_tiles=None):
-        """Draw creatures as small colored shapes."""
+        """Draw creatures using 3D templates."""
         if not creatures:
             return
+        self._load_3d_templates()
         px = self._last_build_x
         py = self._last_build_y
         r2 = self.view_radius * self.view_radius
+        use_templates = getattr(self, '_3d_loaded', False)
 
-        glBegin(GL_TRIANGLES)
         for c in creatures:
             if not c.alive:
                 continue
@@ -210,27 +233,40 @@ class Renderer3D:
             if dx * dx + dy * dy > r2:
                 continue
 
-            # Color based on creature type
-            cc = CREATURE_TYPES.get(c.kind, {}).get('color', (180, 60, 60))
-            glColor3f(cc[0] / 255.0, cc[1] / 255.0, cc[2] / 255.0)
-
             wx, wz = c.x - px, c.y - py
+            if use_templates:
+                cfg = self._creature_configs.get(c.kind, {})
+                template = cfg.get("t", "quadruped")
+                func = self._creature_templates.get(template)
+                if func:
+                    cr = getattr(c, 'cr', 0.25)
+                    sc = 1.0 + min(1.5, cr * 0.3)
+                    glPushMatrix()
+                    glTranslatef(wx + 0.5, 0, wz + 0.5)
+                    glScalef(0.5, 0.5, 0.5)  # scale down for world view
+                    func(sc, c.color, 0, 0, cfg)
+                    glPopMatrix()
+                    continue
+            # Fallback triangle
+            glBegin(GL_TRIANGLES)
+            cc = c.color
+            glColor3f(cc[0] / 255.0, cc[1] / 255.0, cc[2] / 255.0)
             s = 0.2
-            # Simple triangle marker
             glVertex3f(wx + 0.5, 0.6, wz + 0.5 - s)
             glVertex3f(wx + 0.5 - s, 0.1, wz + 0.5 + s)
             glVertex3f(wx + 0.5 + s, 0.1, wz + 0.5 + s)
-        glEnd()
+            glEnd()
 
     def draw_npcs(self, npcs, camera, player=None, visible_tiles=None):
-        """Draw NPCs as small colored shapes."""
+        """Draw NPCs using 3D body-part templates."""
         if not npcs:
             return
+        self._load_3d_templates()
         px = self._last_build_x
         py = self._last_build_y
         r2 = self.view_radius * self.view_radius
+        use_templates = getattr(self, '_3d_loaded', False)
 
-        glBegin(GL_TRIANGLES)
         for npc in npcs:
             if not npc.alive:
                 continue
@@ -239,13 +275,25 @@ class Renderer3D:
             if dx * dx + dy * dy > r2:
                 continue
 
-            glColor3f(0.3, 0.5, 0.9)  # blue for NPCs
             wx, wz = npc.x - px, npc.y - py
-            s = 0.2
-            glVertex3f(wx + 0.5, 0.7, wz + 0.5 - s)
-            glVertex3f(wx + 0.5 - s, 0.1, wz + 0.5 + s)
-            glVertex3f(wx + 0.5 + s, 0.1, wz + 0.5 + s)
-        glEnd()
+            if use_templates and hasattr(self, '_draw_pose_3d'):
+                race = getattr(npc, 'race', 'human')
+                cls = getattr(npc, 'char_class', '')
+                prof = getattr(npc, 'profession', '')
+                color = npc.color
+                glPushMatrix()
+                glTranslatef(wx + 0.5, 0, wz + 0.5)
+                glScalef(0.5, 0.5, 0.5)
+                self._draw_pose_3d("standing", npc.name, prof, cls, race, color, 0)
+                glPopMatrix()
+            else:
+                glBegin(GL_TRIANGLES)
+                glColor3f(0.3, 0.5, 0.9)
+                s = 0.2
+                glVertex3f(wx + 0.5, 0.7, wz + 0.5 - s)
+                glVertex3f(wx + 0.5 - s, 0.1, wz + 0.5 + s)
+                glVertex3f(wx + 0.5 + s, 0.1, wz + 0.5 + s)
+                glEnd()
 
     def draw_ground_items(self, items, camera):
         """Draw ground items as small bright dots."""

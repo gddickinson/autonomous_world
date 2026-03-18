@@ -1,0 +1,113 @@
+"""Per-creature visual config — maps kind to template + accent parameters."""
+
+# Template names: quadruped, ungulate, bear, small, bird, serpent,
+#                 reptile, arachnid, aquatic, humanoid, large, winged, ethereal
+
+CREATURE_CONFIGS = {
+    # ── Canines ─────────────────────────────────────────────────────
+    "wolf":      {"t": "quadruped", "head": "pointed", "ears": "pointed",
+                  "tail": "bushy", "eyes": "predator", "body_r": (1.0, 0.5)},
+    "dire_wolf": {"t": "quadruped", "head": "pointed", "ears": "pointed",
+                  "tail": "bushy", "eyes": "predator", "body_r": (1.2, 0.6)},
+    "fox":       {"t": "quadruped", "head": "pointed", "ears": "pointed",
+                  "tail": "bushy", "eyes": "gentle", "body_r": (0.8, 0.4)},
+    "dog":       {"t": "quadruped", "head": "round", "ears": "floppy",
+                  "tail": "thin", "eyes": "gentle", "body_r": (0.9, 0.5)},
+    # ── Felines ─────────────────────────────────────────────────────
+    "cat":           {"t": "quadruped", "head": "round", "ears": "pointed",
+                      "tail": "curly", "eyes": "predator", "body_r": (0.7, 0.35)},
+    "mountain_lion": {"t": "quadruped", "head": "round", "ears": "round",
+                      "tail": "thin", "eyes": "predator", "body_r": (1.1, 0.5)},
+    # ── Bears ───────────────────────────────────────────────────────
+    "bear":    {"t": "bear", "ears": "round", "eyes": "predator"},
+    "owlbear": {"t": "bear", "ears": "round", "eyes": "predator", "beak": True},
+    # ── Ungulates ───────────────────────────────────────────────────
+    "deer":    {"t": "ungulate", "ears": "pointed", "extras": ["antlers"],
+                "eyes": "gentle", "body_r": (0.9, 0.5)},
+    "elk":     {"t": "ungulate", "ears": "pointed", "extras": ["antlers"],
+                "eyes": "gentle", "body_r": (1.1, 0.55)},
+    "horse":   {"t": "ungulate", "ears": "pointed", "extras": ["mane"],
+                "eyes": "gentle", "body_r": (1.2, 0.55), "tail": "bushy"},
+    "donkey":  {"t": "ungulate", "ears": "floppy", "eyes": "gentle",
+                "body_r": (1.0, 0.55), "tail": "thin"},
+    "cow":     {"t": "ungulate", "ears": "floppy", "extras": ["horns"],
+                "eyes": "gentle", "body_r": (1.2, 0.65)},
+    "goat":    {"t": "ungulate", "ears": "floppy", "extras": ["horns"],
+                "eyes": "gentle", "body_r": (0.8, 0.45)},
+    "sheep":   {"t": "ungulate", "ears": "floppy", "eyes": "gentle",
+                "body_r": (0.9, 0.6), "fluffy": True},
+    "unicorn": {"t": "ungulate", "ears": "pointed", "extras": ["horn", "mane"],
+                "eyes": "glowing", "body_r": (1.1, 0.55), "tail": "bushy"},
+    # ── Boars ───────────────────────────────────────────────────────
+    "boar":      {"t": "quadruped", "head": "flat", "ears": "round",
+                  "tail": "thin", "eyes": "predator", "body_r": (1.0, 0.6),
+                  "extras": ["tusks"]},
+    "wild_boar": {"t": "quadruped", "head": "flat", "ears": "round",
+                  "tail": "thin", "eyes": "predator", "body_r": (1.0, 0.55),
+                  "extras": ["tusks"]},
+    # ── Small critters ──────────────────────────────────────────────
+    "rabbit":   {"t": "small", "shape": "round", "ears": "tall", "tail": "puff"},
+    "squirrel": {"t": "small", "shape": "round", "ears": "round", "tail": "bushy_up"},
+    "rat":      {"t": "small", "shape": "oval", "ears": "round", "tail": "thin"},
+    "pig":      {"t": "small", "shape": "round", "ears": "floppy", "snout": True},
+    "frog":     {"t": "small", "shape": "squat", "ears": "none", "eyes": "big"},
+    # ── Birds ───────────────────────────────────────────────────────
+    "hawk":     {"t": "bird", "size": "medium", "beak": "hooked"},
+    "eagle":    {"t": "bird", "size": "large", "beak": "hooked"},
+    "crow":     {"t": "bird", "size": "small", "beak": "pointed"},
+    "owl":      {"t": "bird", "size": "medium", "beak": "round", "eyes": "big"},
+    "pheasant": {"t": "bird", "size": "medium", "beak": "pointed", "tail_long": True},
+    "chicken":  {"t": "bird", "size": "small", "beak": "pointed", "comb": True},
+    "bat":      {"t": "bird", "size": "small", "beak": "none", "ears": "pointed",
+                 "wings": "membrane"},
+    "phoenix":  {"t": "bird", "size": "large", "beak": "hooked", "fire": True},
+    # ── Reptiles ────────────────────────────────────────────────────
+    "snake":     {"t": "serpent"},
+    "viper":     {"t": "serpent", "head_wide": True},
+    "crocodile": {"t": "reptile", "shape": "long", "jaws": True},
+    "turtle":    {"t": "reptile", "shape": "shell"},
+    "basilisk":  {"t": "reptile", "shape": "long", "eyes": "glowing"},
+    # ── Arachnids ───────────────────────────────────────────────────
+    "spider":         {"t": "arachnid", "legs": 8},
+    "giant_spider":   {"t": "arachnid", "legs": 8, "fangs": True},
+    "giant_scorpion": {"t": "arachnid", "legs": 8, "tail_sting": True, "claws": True},
+    # ── Aquatic ─────────────────────────────────────────────────────
+    "fish":        {"t": "aquatic", "shape": "fish"},
+    "fish_school": {"t": "aquatic", "shape": "school"},
+    "giant_crab":  {"t": "aquatic", "shape": "crab"},
+    # ── Humanoid monsters ───────────────────────────────────────────
+    "goblin":    {"t": "humanoid", "ears": "pointed", "hunched": True},
+    "kobold":    {"t": "humanoid", "ears": "pointed", "hunched": True, "snout": True},
+    "orc":       {"t": "humanoid", "ears": "pointed", "extras": ["tusks"], "bulky": True},
+    "gnoll":     {"t": "humanoid", "ears": "pointed", "snout": True, "hunched": True},
+    "bugbear":   {"t": "humanoid", "ears": "round", "bulky": True, "furry": True},
+    "hobgoblin": {"t": "humanoid", "ears": "pointed", "bulky": True},
+    "bandit":    {"t": "humanoid", "weapon": True, "hood": True},
+    "centaur":   {"t": "ungulate", "ears": "pointed", "body_r": (1.3, 0.6),
+                  "extras": ["humanoid_torso"]},
+    # ── Undead ──────────────────────────────────────────────────────
+    "skeleton": {"t": "humanoid", "bony": True, "eyes": "undead"},
+    "zombie":   {"t": "humanoid", "hunched": True, "tattered": True, "eyes": "undead"},
+    "ghoul":    {"t": "humanoid", "hunched": True, "claws": True, "eyes": "undead"},
+    "wight":    {"t": "humanoid", "eyes": "undead", "armored": True},
+    "wraith":   {"t": "ethereal"},
+    "shadow":   {"t": "ethereal"},
+    "vampire":  {"t": "humanoid", "eyes": "predator", "cape": True},
+    "lich":     {"t": "humanoid", "bony": True, "eyes": "glowing", "crown": True},
+    # ── Large brutes ────────────────────────────────────────────────
+    "ogre":       {"t": "large", "bulky": True, "weapon": True},
+    "troll":      {"t": "large", "hunched": True, "claws": True},
+    "hill_giant": {"t": "large", "bulky": True},
+    "minotaur":   {"t": "large", "extras": ["horns"], "bulky": True},
+    # ── Winged / dragons ────────────────────────────────────────────
+    "young_dragon": {"t": "winged", "wings": "large", "jaws": True, "tail": True},
+    "wyvern":       {"t": "winged", "wings": "large", "tail_sting": True},
+    "griffin":      {"t": "winged", "wings": "medium", "beak": True, "quad": True},
+    "manticore":    {"t": "winged", "wings": "medium", "tail_sting": True, "quad": True},
+    "harpy":        {"t": "winged", "wings": "arm", "humanoid": True},
+    "gargoyle":     {"t": "winged", "wings": "small", "humanoid": True, "stone": True},
+    # ── Special ─────────────────────────────────────────────────────
+    "werewolf": {"t": "humanoid", "ears": "pointed", "hunched": True,
+                 "claws": True, "furry": True, "snout": True},
+    "ankheg":   {"t": "arachnid", "legs": 6, "jaws": True, "armored": True},
+}

@@ -313,9 +313,66 @@ class Renderer3D:
         glEnd()
 
     def draw_night_overlay(self, darkness):
-        """Draw a dark overlay for night time."""
+        """Legacy wrapper — delegates to draw_lighting."""
         if darkness <= 0.01:
             return
+        if darkness >= 0.99:
+            approx_time = 0.0
+        else:
+            approx_time = 0.75 + darkness * 0.083
+        self.draw_lighting(approx_time)
+
+    def draw_lighting(self, game_time_normalized, camera=None, world=None):
+        """Draw smooth day/night lighting overlay with gradual GL transitions.
+
+        Uses the same phase logic as the 2D renderer for consistent visuals.
+        """
+        t = game_time_normalized
+        dawn_start  = 5.0 / 24.0
+        dawn_end    = 7.0 / 24.0
+        morning_end = 10.0 / 24.0
+        afternoon   = 14.0 / 24.0
+        dusk_start  = 17.0 / 24.0
+        dusk_end    = 19.0 / 24.0
+        evening_end = 21.0 / 24.0
+
+        if morning_end <= t < afternoon:
+            return  # peak midday, no overlay
+
+        if dawn_end <= t < morning_end:
+            progress = (t - dawn_end) / (morning_end - dawn_end)
+            alpha = 0.08 * (1.0 - progress)
+            r, g, b = 0.7, 0.55, 0.24
+        elif afternoon <= t < dusk_start:
+            progress = (t - afternoon) / (dusk_start - afternoon)
+            alpha = 0.07 * progress
+            r, g, b = 0.7, 0.51, 0.2
+        elif dawn_start <= t < dawn_end:
+            progress = (t - dawn_start) / (dawn_end - dawn_start)
+            alpha = min(0.43, 0.2 * (1.0 - progress) + 0.47 * max(0, 0.5 - progress))
+            r = 0.86 * (1.0 - progress * 0.6)
+            g = 0.55 * (1.0 - progress * 0.4)
+            b = 0.16 * (1.0 - progress)
+        elif dusk_start <= t < dusk_end:
+            progress = (t - dusk_start) / (dusk_end - dusk_start)
+            alpha = 0.12 + 0.35 * progress
+            r = 0.78 * (1.0 - progress * 0.7) + 0.16 * progress
+            g = 0.43 * (1.0 - progress * 0.8)
+            b = 0.2 + 0.16 * progress
+        elif dusk_end <= t < evening_end:
+            progress = (t - dusk_end) / (evening_end - dusk_end)
+            alpha = 0.47 + 0.12 * progress
+            r = 0.16 * (1.0 - progress) + 0.04 * progress
+            g = 0.1 * (1.0 - progress) + 0.04 * progress
+            b = 0.27 * (1.0 - progress) + 0.2 * progress
+        else:
+            # Night
+            alpha = 0.59
+            r, g, b = 0.04, 0.04, 0.2
+
+        if alpha < 0.01:
+            return
+
         glMatrixMode(GL_PROJECTION)
         glPushMatrix()
         glLoadIdentity()
@@ -327,8 +384,7 @@ class Renderer3D:
         glEnable(GL_BLEND)
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
 
-        alpha = min(0.85, darkness * 0.9)
-        glColor4f(0.0, 0.0, 0.05, alpha)
+        glColor4f(r, g, b, alpha)
         glBegin(GL_QUADS)
         glVertex2f(0, 0)
         glVertex2f(self.screen_w, 0)

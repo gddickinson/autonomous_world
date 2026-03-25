@@ -9,7 +9,8 @@ from game.core.items import Item, make_item
 
 class Player(Entity):
     """The player character."""
-    def __init__(self, x: float, y: float):
+    def __init__(self, x: float, y: float, char_class: str = "Fighter",
+                 race: str = "Human", ability_scores: dict = None):
         super().__init__(x, y)
         self.max_hp = PLAYER_MAX_HP
         self.hp = PLAYER_MAX_HP
@@ -37,21 +38,31 @@ class Player(Entity):
         self.name = "Player"
 
         # D&D Character
-        self.char_class = "Fighter"  # default, can be changed
-        self.race = "Human"
+        self.char_class = char_class
+        self.race = race
         self.level = 1
         from game.data.dnd import roll_ability_scores, ability_modifier, get_class_hp, CLASSES, get_class_abilities, get_proficiency_bonus
-        self.ability_scores = roll_ability_scores(self.race, self.char_class)
+        self.ability_scores = ability_scores if ability_scores else roll_ability_scores(self.race, self.char_class)
         self.proficiency_bonus = get_proficiency_bonus(self.level)
         cls_data = CLASSES.get(self.char_class, {})
         self.is_spellcaster = cls_data.get("spellcaster", False)
-        self.known_spells = list(cls_data.get("spell_list", []))[:3]
         self.spell_slots = [0, 0, 0]
         if self.is_spellcaster:
+            # Spellcasters start with cantrips + level-1 spells from their spell list
+            from game.data.dnd import SPELLS as _DND_SPELLS
+            full_spell_list = list(cls_data.get("spell_list", []))
+            cantrips = [s for s in full_spell_list if _DND_SPELLS.get(s, {}).get("level", 99) == 0]
+            lvl1_spells = [s for s in full_spell_list if _DND_SPELLS.get(s, {}).get("level", 99) == 1]
+            # 3 cantrips + 2 level-1 spells at level 1 (D&D 5e Wizard baseline)
+            self.known_spells = cantrips[:3] + lvl1_spells[:2]
+            if not self.known_spells:
+                self.known_spells = full_spell_list[:5]  # fallback
             slot_table = cls_data.get("spell_slots", {})
             for lvl in sorted(slot_table.keys()):
                 if lvl <= self.level:
                     self.spell_slots = list(slot_table[lvl])
+        else:
+            self.known_spells = []
         self.spell_slots_used = [0, 0, 0]
         self.class_abilities = get_class_abilities(self.char_class, self.level)
         self.armor_class = 10 + ability_modifier(self.ability_scores.get("dexterity", 10))

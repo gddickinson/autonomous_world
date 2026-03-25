@@ -82,6 +82,15 @@ class SimConversationsMixin:
         npc.npc_relationships[other.name] = npc.npc_relationships.get(other.name, 0) + 3
         other.npc_relationships[npc.name] = other.npc_relationships.get(npc.name, 0) + 2
 
+        # Generate overheard snippet for player if nearby
+        snippet_mgr = getattr(self, '_snippet_manager', None)
+        if snippet_mgr is not None:
+            player = getattr(self, '_player_ref', None)
+            if player is not None:
+                snippet_mgr.try_add_snippet(
+                    npc, other, "greeting",
+                    player.x, player.y)
+
     def _start_trade(self, npc: NPC, target_name: str):
         other = self._find_npc(target_name)
         if not other or not other.alive:
@@ -192,6 +201,13 @@ class SimConversationsMixin:
         share_gossip(npc1, npc2, self.event_log,
                      current_day=self.time_sys.day)
 
+        # --- Overheard snippet: gossip ---
+        snippet_mgr = getattr(self, '_snippet_manager', None)
+        player = getattr(self, '_player_ref', None)
+        if snippet_mgr and player:
+            snippet_mgr.try_add_snippet(npc1, npc2, "gossip",
+                                        player.x, player.y)
+
         # --- Needs-driven help: share food with hungry friend ---
         if rel12 > 10 and npc2.needs.get("hunger", 50) < 30 and npc1.has_food():
             for item in list(npc1.npc_inventory):
@@ -206,6 +222,10 @@ class SimConversationsMixin:
                                     target=npc1.name, cause=f"{npc1.name} gave me food",
                                     game_time=gt)
                     self.event_log.append(f"{npc1.name} shared food with hungry {npc2.name}")
+                    if snippet_mgr and player:
+                        snippet_mgr.try_add_snippet(
+                            npc1, npc2, "food_sharing",
+                            player.x, player.y)
                     break
         elif rel21 > 10 and npc1.needs.get("hunger", 50) < 30 and npc2.has_food():
             for item in list(npc2.npc_inventory):
@@ -220,6 +240,10 @@ class SimConversationsMixin:
                                     target=npc2.name, cause=f"{npc2.name} gave me food",
                                     game_time=gt)
                     self.event_log.append(f"{npc2.name} shared food with hungry {npc1.name}")
+                    if snippet_mgr and player:
+                        snippet_mgr.try_add_snippet(
+                            npc2, npc1, "food_sharing",
+                            player.x, player.y)
                     break
 
         # --- Skill teaching (friends teach each other) ---
@@ -243,6 +267,10 @@ class SimConversationsMixin:
                 npc2.add_memory("social", f"{npc1.name} comforted me when I was sad", 4)
                 npc2.npc_relationships[npc1.name] = min(100, rel21 + 5)
                 npc2.needs["social"] = min(100, npc2.needs.get("social", 50) + 15)
+                if snippet_mgr and player:
+                    snippet_mgr.try_add_snippet(
+                        npc1, npc2, "comfort",
+                        player.x, player.y)
         if es1 and rel21 > 10:
             sadness = es1.primary.get("sadness", 0) if hasattr(es1, 'primary') else 0
             if sadness > 0.4:
@@ -251,6 +279,10 @@ class SimConversationsMixin:
                 npc1.add_memory("social", f"{npc2.name} comforted me when I was sad", 4)
                 npc1.npc_relationships[npc2.name] = min(100, rel12 + 5)
                 npc1.needs["social"] = min(100, npc1.needs.get("social", 50) + 15)
+                if snippet_mgr and player:
+                    snippet_mgr.try_add_snippet(
+                        npc2, npc1, "comfort",
+                        player.x, player.y)
 
         # --- Deep conversation (high relationship builds bonds) ---
         if rel12 > 40 and rel21 > 40 and random.random() < 0.1:
@@ -286,6 +318,10 @@ class SimConversationsMixin:
                 npc2.add_memory("social", f"{npc1.name} warned me: {warning[:40]}", 3)
                 trigger_emotion(npc2, "heard_threat", intensity=0.3,
                                 cause=warning[:40], game_time=gt)
+                if snippet_mgr and player:
+                    snippet_mgr.try_add_snippet(
+                        npc1, npc2, "warning",
+                        player.x, player.y)
 
     def _npc_teach(self, teacher: NPC, student: NPC, gt: float):
         """Teacher NPC teaches their best skill to student NPC."""
@@ -307,6 +343,12 @@ class SimConversationsMixin:
         rel = student.npc_relationships.get(teacher.name, 0)
         student.npc_relationships[teacher.name] = min(100, rel + 5)
         self.event_log.append(f"{teacher.name} taught {student.name} about {best}")
+        snippet_mgr = getattr(self, '_snippet_manager', None)
+        player = getattr(self, '_player_ref', None)
+        if snippet_mgr and player:
+            snippet_mgr.try_add_snippet(
+                teacher, student, "teaching",
+                player.x, player.y)
 
     def _npc_barter(self, npc1: NPC, npc2: NPC, gt: float):
         """NPCs trade items based on their needs and what they have."""
@@ -344,6 +386,12 @@ class SimConversationsMixin:
                         npc1.needs["hunger"] = min(100, npc1.needs["hunger"] + 20)
                     elif getattr(item, 'heal', 0) > 0:
                         npc1.heal(item.heal)
+                    snippet_mgr = getattr(self, '_snippet_manager', None)
+                    player = getattr(self, '_player_ref', None)
+                    if snippet_mgr and player:
+                        snippet_mgr.try_add_snippet(
+                            npc1, npc2, "trade",
+                            player.x, player.y)
                     return  # one trade per conversation
 
     # ---- WORLD EVENTS ----

@@ -73,12 +73,18 @@ class RendererEntitiesMixin:
             update_anim(npc, getattr(self, '_last_dt', 0.016))
             draw_npc_body(self.screen, npc, int(sx), int(sy), s)
 
-            # Consciousness glow
             if npc.consciousness > 0:
-                glow_color = CONSCIOUSNESS_COLORS.get(npc.consciousness, (140, 140, 200))
-                gr = max(4, s * 3)
-                glow_surf = pygame.Surface((gr * 2, gr * 2), pygame.SRCALPHA)
-                pygame.draw.circle(glow_surf, (*glow_color, 60), (gr, gr), gr)
+                if not hasattr(self, '_consciousness_glow_cache'):
+                    self._consciousness_glow_cache = {}
+                cache_key = npc.consciousness
+                glow_surf = self._consciousness_glow_cache.get(cache_key)
+                if glow_surf is None:
+                    glow_color = CONSCIOUSNESS_COLORS.get(cache_key, (140, 140, 200))
+                    gr = max(4, s * 3)
+                    glow_surf = pygame.Surface((gr * 2, gr * 2), pygame.SRCALPHA)
+                    pygame.draw.circle(glow_surf, (*glow_color, 60), (gr, gr), gr)
+                    self._consciousness_glow_cache[cache_key] = glow_surf
+                gr = glow_surf.get_width() // 2
                 self.screen.blit(glow_surf, (int(sx) - gr, int(sy) - bh // 2 - gr // 2))
 
             # Quest marker

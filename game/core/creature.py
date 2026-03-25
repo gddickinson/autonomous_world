@@ -53,6 +53,15 @@ class Creature(Entity):
             self.cr = 0.25
             self.passive = False
 
+        # Apply difficulty HP scaling
+        from game.systems.difficulty import scale_enemy_hp
+        self.max_hp = scale_enemy_hp(self.max_hp)
+        self.hp = self.max_hp
+
+        # Biological needs (managed by CreatureNeedsSystem)
+        self.hunger = 80.0
+        self.thirst = 80.0
+
         # AI
         self.state = "idle"  # idle, wandering, chasing, attacking, fleeing
         self.target: Optional[Entity] = None
@@ -93,12 +102,20 @@ class Creature(Entity):
         else:
             self.body = Body("quadruped", scale_hp=self.max_hp)
 
+        # Dialog capability for intelligent monsters
+        self.dialog = None          # dialog tree dict, set by dialog system
+        self.wants_to_talk = False  # True when creature wants to initiate conversation
+        self.talk_reason = ""       # reason for wanting to talk
+
         # Drops
         self.drops = self._generate_drops(kind)
 
         # Respawn
         self.respawn_timer = 0.0
         self.respawn_time = 60.0
+
+    def __lt__(self, other):
+        return self.x < getattr(other, 'x', 0)
 
     def _generate_drops(self, kind: str) -> List[Tuple[str, float]]:
         """Generate possible drops from D&D monster data or fallback."""
@@ -116,10 +133,11 @@ class Creature(Entity):
         return fallback.get(kind, [])
 
     def get_drops(self) -> List[Item]:
-        """Roll for drops when killed."""
+        """Roll for drops when killed (scaled by difficulty loot_chance)."""
+        from game.systems.difficulty import scale_loot_chance
         result = []
         for item_name, prob in self.drops:
-            if random.random() < prob:
+            if random.random() < scale_loot_chance(prob):
                 result.append(make_item(item_name))
         # Always drop a small amount of gold equivalent
         return result

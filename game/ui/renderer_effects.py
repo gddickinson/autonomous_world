@@ -4,7 +4,9 @@ import pygame
 import random
 import math
 import time
+from typing import Optional
 from game.settings import *
+from game.world.camera import Camera
 
 
 class RendererEffectsMixin:
@@ -56,6 +58,20 @@ class RendererEffectsMixin:
         self._seasonal_color_cache[(FRUIT_TREE, "winter")] = (110, 105, 95)
         self._seasonal_color_cache[(HERB_PATCH, "winter")] = (130, 135, 120)
         self._seasonal_color_cache[(FLOWER_BED, "winter")] = (160, 155, 145)
+
+        # --- Crop tiles (WHEAT_FIELD, VEGETABLE_PLOT) seasonal variants ---
+        self._seasonal_color_cache[(WHEAT_FIELD, "spring")] = (150, 165, 60)
+        self._seasonal_color_cache[(WHEAT_FIELD, "summer")] = (190, 175, 65)
+        self._seasonal_color_cache[(WHEAT_FIELD, "autumn")] = (200, 180, 70)
+        self._seasonal_color_cache[(WHEAT_FIELD, "winter")] = (140, 135, 110)
+        self._seasonal_color_cache[(VEGETABLE_PLOT, "spring")] = (75, 170, 60)
+        self._seasonal_color_cache[(VEGETABLE_PLOT, "summer")] = (70, 155, 55)
+        self._seasonal_color_cache[(VEGETABLE_PLOT, "autumn")] = (100, 130, 50)
+        self._seasonal_color_cache[(VEGETABLE_PLOT, "winter")] = (130, 130, 110)
+        self._seasonal_color_cache[(TILLED_SOIL, "spring")] = (105, 90, 55)
+        self._seasonal_color_cache[(TILLED_SOIL, "summer")] = (100, 85, 50)
+        self._seasonal_color_cache[(TILLED_SOIL, "autumn")] = (110, 95, 60)
+        self._seasonal_color_cache[(TILLED_SOIL, "winter")] = (130, 120, 100)
 
     def _build_seasonal_tile_cache(self, season: str):
         """Build pre-rendered tile surfaces for a given season.
@@ -259,13 +275,19 @@ class RendererEffectsMixin:
         return self._seasonal_tile_cache.get(key)
 
     def draw_night_overlay(self, darkness: float):
-        """Legacy wrapper — delegates to draw_lighting for full day/night."""
-        # Called from main._draw with darkness from TimeSystem.
-        # We still support the old call signature for backward compat.
+        """Legacy wrapper — converts darkness to normalized time, delegates to draw_lighting."""
         if darkness <= 0:
             return
-        # Use the new lighting method with the darkness value
-        self._draw_night_lighting(darkness)
+        # Approximate a normalized time from darkness: full dark -> midnight (0.0)
+        # This keeps backward compat while using the smooth transition path.
+        if darkness >= 0.99:
+            approx_time = 0.0  # midnight
+        elif darkness > 0:
+            # Dusk range: map darkness 0->1 to time 0.75->0.833
+            approx_time = 0.75 + darkness * 0.083
+        else:
+            approx_time = 0.5  # noon
+        self.draw_lighting(approx_time)
 
     def draw_particles(self, camera: Camera, dt: float, player=None):
         """Update and draw particle effects (core + ambient effects)."""
@@ -416,14 +438,36 @@ class RendererEffectsMixin:
 
         if spell_name == "fireball":
             self._spawn_fireball_effect(tx, ty)
-        elif spell_name in ("ice_shard", "ice_wall", "frost_nova"):
+        elif spell_name in ("ice_shard", "ice_wall", "frost_nova",
+                             "ice_storm", "cone_of_cold", "ray_of_frost"):
             self._spawn_ice_effect(tx, ty)
-        elif spell_name in ("lightning_bolt", "chain_lightning"):
+        elif spell_name in ("lightning_bolt", "chain_lightning",
+                             "thunderwave"):
             self._spawn_lightning_effect(x, y, tx, ty)
-        elif spell_name in ("heal", "mass_heal", "greater_heal"):
+        elif spell_name in ("heal", "mass_heal", "greater_heal",
+                             "restoration"):
             self._spawn_heal_effect(tx, ty)
         else:
-            # Generic spell effect using spell school colors
-            self._spawn_generic_spell_effect(spell_name, tx, ty)
+            # Check for extended elemental types via elemental_renderer
+            from game.ui.elemental_renderer import get_spell_particle_colors
+            colors = get_spell_particle_colors(spell_name)
+            if colors:
+                self._spawn_colored_spell_effect(tx, ty, colors)
+            else:
+                # Generic spell effect using spell school colors
+                self._spawn_generic_spell_effect(spell_name, tx, ty)
+
+    def _spawn_colored_spell_effect(self, x, y, colors):
+        """Spawn particles with custom colors at (x, y)."""
+        for _ in range(8):
+            self.particles.append({
+                "x": x + random.uniform(-0.5, 0.5),
+                "y": y + random.uniform(-0.5, 0.5),
+                "vx": random.uniform(-1.5, 1.5),
+                "vy": random.uniform(-2.5, 0),
+                "color": random.choice(colors),
+                "life": random.uniform(0.4, 1.0),
+                "size": random.randint(2, 4),
+            })
 
 

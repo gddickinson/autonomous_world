@@ -313,6 +313,12 @@ class GameRenderMixin:
                     if hasattr(self.renderer, 'spawn_death_effect'):
                         self.renderer.spawn_death_effect(c.x, c.y)
                     self.quest_sys.on_kill(c.kind)
+                    # Multiplayer: broadcast quest kill progress
+                    if hasattr(self, '_mp_broadcast_quest_kill'):
+                        for q in self.quest_sys.active_quests:
+                            if q.target == c.kind and not q.completed:
+                                self._mp_broadcast_quest_kill(q, self.player.name)
+                                break
                     # Quest trigger: defend quests when creature dies near settlement
                     for s in self.world.structures:
                         if s.kind in ("village", "town", "city", "hamlet", "castle"):
@@ -552,6 +558,15 @@ class GameRenderMixin:
                 _all_entities = list(self.world_mgr.creatures) + list(self.world_mgr.npcs)
                 r.draw_enemy_hp_bars(_all_entities, self.camera, dt)
 
+            # Combat visual effects: damage popups, hit flashes, death effects, HP bars
+            if hasattr(r, 'combat_fx'):
+                r.combat_fx.update_and_draw(self.screen, self.camera, dt)
+                r.combat_fx.draw_hp_bars(self.screen, self.camera, dt)
+
+            # Overheard NPC conversation snippets (floating text)
+            if hasattr(self, '_draw_conversation_snippets'):
+                self._draw_conversation_snippets(dt)
+
             # Spell visual effects (combat polish)
             if hasattr(r, 'draw_spell_effects'):
                 r.draw_spell_effects(self.camera, dt)
@@ -586,15 +601,18 @@ class GameRenderMixin:
             # Seasonal tile palette update (4 times per year)
             if hasattr(r, 'set_season') and hasattr(self.simulation, 'ecology'):
                 r.set_season(self.simulation.ecology.season)
+            # Bind vegetation/crop systems for per-tile color overrides
+            if hasattr(r, 'set_vegetation_systems') and r._vegetation_sys is None:
+                if hasattr(self.simulation, 'vegetation_sys'):
+                    r.set_vegetation_systems(
+                        self.simulation.vegetation_sys,
+                        getattr(self.simulation, 'crop_system', None))
             # Weather visual effects (rain, snow, fog, storm)
             if hasattr(r, 'draw_weather') and hasattr(self.simulation, 'ecology'):
                 _weather = self.simulation.ecology.weather
                 r.draw_weather(_weather, self.camera, self.clock.get_time() / 1000.0)
             if not is_3d:  # night overlay uses pygame blit in 2D, GL in 3D
-                if hasattr(r, 'draw_lighting'):
-                    r.draw_lighting(self.time_sys.normalized, self.camera, self.world)
-                else:
-                    r.draw_night_overlay(self.time_sys.darkness)
+                r.draw_lighting(self.time_sys.normalized, self.camera, self.world)
 
             # Undo screen shake offset so camera is stable for HUD/UI
             if _shake_dx or _shake_dy:
@@ -681,7 +699,9 @@ class GameRenderMixin:
 
             # Quest tracker HUD (only when no panels are open)
             if not self.ui.any_panel_open:
-                self.ui.draw_quest_tracker(self.quest_sys.active_quests)
+                self.quest_tracker.draw(
+                    self.screen, self.quest_sys.active_quests,
+                    self.player, self.world)
 
             if self.ui.show_world_map:
                 self.ui.world_map_view.update_scroll(1.0 / FPS)
@@ -691,10 +711,21 @@ class GameRenderMixin:
             if self.combat.active:
                 self._draw_combat_ui()
 
+            # Phase 6: Settlement overview, combat log, fast travel panels
+            economy_sys = getattr(self.simulation, 'economy', None)
+            self.settlement_panel.draw(
+                self.screen, self.world, self.player,
+                self.world_mgr.npcs, self.chronicles, economy_sys)
+            self.combat_log_panel.draw(self.screen)
+            self.fast_travel_ui.draw(self.screen)
+
             # Pause menu is now handled by MenuSystem (blocking modal)
             # self.ui.draw_pause_menu() is no longer used
             if self.dead:
                 self.ui.draw_death_screen()
+
+            # Controls overlay (on top of everything)
+            self.controls_overlay.draw(self.screen)
 
         # Mode indicator
         if self.player_mode == "ghost":

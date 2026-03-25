@@ -37,7 +37,15 @@ class Entity:
         self.hp = max(0, self.hp - actual)
         if self.hp <= 0:
             self.alive = False
+            self._on_death()
         return actual
+
+    def _on_death(self):
+        """Called when HP reaches 0. Subclasses can override for cleanup."""
+        import time as _t
+        self.vx = 0.0
+        self.vy = 0.0
+        self._death_time = _t.time()
 
     def heal(self, amount: int):
         self.hp = min(self.max_hp, self.hp + amount)

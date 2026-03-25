@@ -3,6 +3,7 @@
 import math
 import pygame
 from game.settings import TILE_SIZE
+import game.ui.profession_sprites as _prof_sprites
 
 _sin = math.sin
 _cos = math.cos
@@ -251,12 +252,24 @@ def draw_npc_body(screen, npc, sx: int, sy: int, s: int, mounted=False):
         arm_swing = 0
 
     state = getattr(npc, 'state', 'idle')
+    current_action = getattr(npc, 'current_action', '')
+
+    # Talking gesture detection
+    _talking = (state in ('talking', 'socializing')
+                or 'talking' in (current_action or '')
+                or 'conversation' in (current_action or ''))
+
     fleeing = state == 'fleeing'
     if fleeing:
         leg_swing = int(leg_swing * 1.6)
         arm_swing = int(arm_swing * 1.6)
 
-    torso_color = armor_color if armored and armor_color else body_color
+    # Profession-based visual overrides
+    prof_torso = _prof_sprites.get_profession_torso_color(profession)
+    prof_arms = _prof_sprites.get_profession_arm_color(profession)
+    prof_wide = _prof_sprites.should_widen_torso(profession)
+    torso_color = (prof_torso if prof_torso and not (armored and armor_color)
+                   else (armor_color if armored and armor_color else body_color))
     dark_body = _darken(body_color, 20)
     dark_body2 = _darken(body_color, 35)
     dark_torso = _darken(torso_color, 25)
@@ -265,6 +278,8 @@ def draw_npc_body(screen, npc, sx: int, sy: int, s: int, mounted=False):
     leg_w = max(1, rs)
     leg_h = max(2, rs * 2)
     torso_w = max(3, rs * 3)
+    if prof_wide:
+        torso_w = max(4, int(rs * 3.6))  # wider torso for apron professions
     torso_h = max(3, rs * 3)
     torso_x = sx - torso_w // 2
     torso_y = sy - rs + breath_offset
@@ -276,6 +291,17 @@ def draw_npc_body(screen, npc, sx: int, sy: int, s: int, mounted=False):
     head_r = max(2, rs + 1)
     head_x = sx
     head_y = torso_y - head_r + breath_offset - head_bob
+
+    # Talking idle gestures: head nod + hand wave
+    _talk_head_dy = 0
+    _talk_arm_dx = 0
+    if _talking:
+        _phase = anim.idle_phase
+        # Head nod: +-1 pixel, period ~1.5s (idle_phase runs at 1.5 rad/s)
+        _talk_head_dy = int(round(_sin(_phase * 1.0) * 1.0))
+        # Hand wave: +-2 pixels horizontal, slower period ~2s
+        _talk_arm_dx = int(round(_sin(_phase * 0.75) * 2.0))
+    head_y += _talk_head_dy
     hip_y = torso_y + torso_h
 
     draw = pygame.draw
@@ -300,18 +326,21 @@ def draw_npc_body(screen, npc, sx: int, sy: int, s: int, mounted=False):
         draw.rect(screen, dark_torso, (torso_x, torso_y, torso_w, torso_h),
                   1, border_radius=br)
 
-    # ── Arms (rects sliding vertically from shoulders) ─────────────
+    # ── Arms ─────────────────────────────────────────────────────
+    arm_color = prof_arms if prof_arms else skin
     l_arm_y = arm_top + arm_swing
     r_arm_y = arm_top - arm_swing
     if fleeing:
         # Arms raised: draw shorter, higher up
-        draw.rect(screen, skin, (la_x, torso_y - rs, arm_w, arm_h // 2))
-        draw.rect(screen, skin, (ra_x, torso_y - rs, arm_w, arm_h // 2))
+        draw.rect(screen, arm_color, (la_x, torso_y - rs, arm_w, arm_h // 2))
+        draw.rect(screen, arm_color, (ra_x, torso_y - rs, arm_w, arm_h // 2))
         l_arm_y = torso_y - rs
         r_arm_y = torso_y - rs
     else:
-        draw.rect(screen, skin, (la_x, l_arm_y, arm_w, arm_h))
-        draw.rect(screen, skin, (ra_x, r_arm_y, arm_w, arm_h))
+        # Talking gesture: extend right arm outward slightly
+        _ra_draw_x = ra_x + _talk_arm_dx if _talking else ra_x
+        draw.rect(screen, arm_color, (la_x, l_arm_y, arm_w, arm_h))
+        draw.rect(screen, arm_color, (_ra_draw_x, r_arm_y, arm_w, arm_h))
 
     # ── Head ───────────────────────────────────────────────────────
     draw.circle(screen, skin, (head_x, head_y), head_r)
@@ -325,11 +354,18 @@ def draw_npc_body(screen, npc, sx: int, sy: int, s: int, mounted=False):
         draw.circle(screen, _EYE_COLOR, (head_x - eye_r - 1 + eox, eye_y), eye_r)
         draw.circle(screen, _EYE_COLOR, (head_x + eye_r + 1 + eox, eye_y), eye_r)
 
+    # ── Profession head decoration (hat/helmet) ────────────────────
+    _prof_sprites.draw_profession_head(screen, profession, head_x, head_y, head_r, rs)
+
     # ── Hand positions (outer edge, bottom of arm) ─────────────────
     r_hand_x = ra_x + arm_w
     r_hand_y = r_arm_y + arm_h if not fleeing else torso_y - rs + arm_h // 2
     l_hand_x = la_x
     l_hand_y = l_arm_y + arm_h if not fleeing else torso_y - rs + arm_h // 2
+
+    # ── Profession tool (hammer, fishing rod, barrel) ────────────────
+    if weapon_type == 0 and _prof_sprites.get_tool_type(profession):
+        _prof_sprites.draw_profession_tool(screen, profession, r_hand_x, r_hand_y, rs)
 
     # ── Equipment (conditional — most NPCs are civilians) ───────────
     if weapon_type == 1:

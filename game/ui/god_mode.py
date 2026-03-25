@@ -205,9 +205,16 @@ class GodModeUI:
             self.python_console.toggle()
             return True
 
-        # G = Toggle floating panel
-        if key == pygame.K_g:
+        # F11 or ESC = Toggle/close floating panel
+        # (G key is reserved for divine event menu when divine_commands active)
+        if key == pygame.K_F11:
             self.panel_visible = not self.panel_visible
+            return True
+        if key == pygame.K_g and not hasattr(self.game, 'divine_commands'):
+            self.panel_visible = not self.panel_visible
+            return True
+        if key == pygame.K_ESCAPE and self.panel_visible:
+            self.panel_visible = False
             return True
 
         # F1-F5 = Switch tabs (and open panel if closed)
@@ -1110,7 +1117,7 @@ class GodModeUI:
             "--- Gold ---",
             f"  Player gold: {player_gold}",
             f"  NPC total gold: {total_gold:.0f}",
-            f"  Kingdom treasuries: {sum(getattr(gov.kingdoms.get(k['name']), 'treasury', 0) for k in plan_kingdoms):.0f}",
+            f"  Kingdom treasuries: {int(sum(getattr(gov.kingdoms.get(k['name']), 'treasury', 0) for k in plan_kingdoms))}",
         ])
 
         # Profession breakdown
@@ -1296,6 +1303,11 @@ class GodModeUI:
 
     def _draw_world_overlay(self, screen: pygame.Surface):
         """Draw information overlays directly on the game world."""
+        # Skip overlay when the full world map is open — labels would
+        # render on top of the map using the wrong coordinate system.
+        if getattr(self.game, 'ui', None) and getattr(self.game.ui, 'show_world_map', False):
+            return
+
         camera = self.game.camera
         game = self.game
 

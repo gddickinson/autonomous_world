@@ -48,7 +48,7 @@ class Conversation:
         self.npc1 = npc1
         self.npc2 = npc2
         self.timer = random.uniform(3.0, 6.0)
-        self.started = time.time()
+        self.started = 0.0  # elapsed game-time; tracked via dt
         self.info_exchanged: List[str] = []
 
 
@@ -57,9 +57,12 @@ class Conversation:
 # ================================
 
 class WorldEvent:
-    """A random event affecting the world."""
+    """A random event affecting the world.
+    Duration is tracked in game-time seconds (scaled by time_speed via dt).
+    """
     def __init__(self, name: str, description: str, x: float, y: float,
-                 radius: float, duration: float, effects: Dict[str, Any]):
+                 radius: float, duration: float, effects: Dict[str, Any],
+                 game_day: int = 0):
         self.name = name
         self.description = description
         self.x = x
@@ -67,7 +70,7 @@ class WorldEvent:
         self.radius = radius
         self.duration = duration
         self.effects = effects
-        self.started = time.time()
+        self.started_day = game_day  # game day when event started
         self.announced = False
 
     def affects(self, entity) -> bool:
@@ -331,6 +334,25 @@ class SimulationManager(SimCombatMixin, SimNeedsMixin, SimConversationsMixin,
         self.ecology = EcologySystem()
         self.ecology.set_world_manager(world_mgr)
 
+        # Deep ecosystem: creature biological needs, vegetation, ecosystem loops
+        from game.systems.creature_needs import CreatureNeedsSystem
+        from game.systems.vegetation import VegetationSystem
+        from game.systems.ecosystem import EcosystemManager
+        self.creature_needs = CreatureNeedsSystem()
+        self.vegetation_sys = VegetationSystem()
+        self.ecosystem_mgr = EcosystemManager()
+        self.creature_needs.set_vegetation(self.vegetation_sys)
+
+        # Crop system (seasonal growth cycles with visual feedback)
+        from game.systems.crop_system import CropSystem
+        self.crop_system = CropSystem()
+        self._crop_last_day = -1
+
+        # Forest regrowth (cleared tiles slowly regenerate)
+        from game.systems.forest_regrowth import ForestRegrowthSystem
+        self.forest_regrowth = ForestRegrowthSystem()
+        self._regrowth_last_day = -1
+
         # Global Climate Model (pressure systems, temperature, precipitation)
         from game.systems.climate import ClimateModel
         _plan = getattr(world, 'plan', None)
@@ -340,6 +362,8 @@ class SimulationManager(SimCombatMixin, SimNeedsMixin, SimConversationsMixin,
             world_plan=_plan,
         )
         self._climate_last_day = -1
+        self._trade_last_day = -1
+        self._construction_last_day = -1
 
         # Population dynamics (birth, migration, settlement growth)
         from game.systems.population import PopulationSystem
@@ -401,6 +425,10 @@ class SimulationManager(SimCombatMixin, SimNeedsMixin, SimConversationsMixin,
         # Political intrigue (NPC power struggles)
         from game.systems.intrigue import IntrigueSystem
         self.intrigue = IntrigueSystem()
+
+        # Dynamic world events (emergent story system — Phase 4)
+        from game.systems.dynamic_events import DynamicEventsSystem
+        self.dynamic_events = DynamicEventsSystem()
 
         # Monster societies (intelligent creature governance)
         from game.systems.monster_society import MonsterSocietyManager
@@ -620,6 +648,22 @@ class SimulationManager(SimCombatMixin, SimNeedsMixin, SimConversationsMixin,
         self.storyteller = AIStoryteller(personality="balanced")
         self._storyteller_last_day = -1
 
+        # Kingdom Strategic AI (governance-driven military/economic decisions)
+        from game.systems.kingdom_ai import KingdomAI
+        self.kingdom_ai = KingdomAI()
+        self._kingdom_ai_last_day = -1
+
+        # Mining system (mine establishment, extraction, depletion)
+        from game.systems.mining_system import MiningSystem
+        self.mining = MiningSystem()
+        self.mining.auto_establish_for_mining_settlements(
+            world.structures, 0)
+        self._mining_last_day = -1
+
+        # Conversation snippet manager (overhear NPC-NPC conversations)
+        from game.systems.conversation_snippets import SnippetManager
+        self._snippet_manager = SnippetManager()
+
         # Rate limiting
         self._last_llm_time = 0.0
         self._llm_min_interval = 0.1  # rate limit between NPC decisions
@@ -688,10 +732,21 @@ class SimulationManager(SimCombatMixin, SimNeedsMixin, SimConversationsMixin,
                         npc.needs["rest"] = min(100, npc.needs["rest"] + 0.5 * dormant_effective_dt)
                     else:
                         npc.needs["rest"] = max(0, npc.needs["rest"] - NEED_DECAY["rest"] * dormant_effective_dt * race_mods.get("rest", 1.0))
-                    # Stabilize: prevent death off-screen by auto-satisfying critical needs
+                    # Stabilize dormant NPCs: floor of 20 so off-screen NPCs
+                    # never starve. Only active (on-screen) NPCs face real
+                    # needs pressure. Well-supplied settlements get even higher.
+                    dormant_floor = 20
+                    if hasattr(self, 'abstract'):
+                        # NPCs in well-supplied settlements get a higher floor
+                        for sa in getattr(self.abstract, 'settlements', {}).values():
+                            if (abs(npc.home_x - sa.x) < 30
+                                    and abs(npc.home_y - sa.y) < 30
+                                    and sa.food_supply > 40):
+                                dormant_floor = 35
+                                break
                     for need in npc.needs:
-                        if npc.needs[need] < 15:
-                            npc.needs[need] = 15
+                        if npc.needs[need] < dormant_floor:
+                            npc.needs[need] = dormant_floor
                     # Auto-eat/drink if they have supplies
                     if npc.needs["hunger"] < 30 and npc.has_food():
                         npc.consume_food()
@@ -722,9 +777,18 @@ class SimulationManager(SimCombatMixin, SimNeedsMixin, SimConversationsMixin,
 
         self._request_decisions(npcs, dt, player)
         self._poll_decisions(npcs)
+        # Intelligent creature approach checks
+        nearby_creatures = self.creature_grid.get_nearby(
+            player.x, player.y, 10)
+        self._check_creature_approaches(nearby_creatures, dt, player)
         self._update_conversations(dt)
+        self._snippet_manager.update(dt)
         self._update_events(dt, npcs, player)
         self._npc_combat_tick(npcs, dt)
+
+        # Remove dead NPC entities after 30 seconds
+        if self._sim_tick % 30 == 0:
+            self._remove_dead_npcs(npcs)
 
         # Body damage: wound healing, bleeding, infection
         _bd_entities = list(npcs)
@@ -864,7 +928,10 @@ class SimulationManager(SimCombatMixin, SimNeedsMixin, SimConversationsMixin,
 
         # Governance (kingdoms, diplomacy, succession) — every 10th tick
         if self._sim_tick % 10 == 5:
-            self.governance.update(dt * 10, npcs, self.time_sys.day)
+            _wm = self.world_market if hasattr(self, 'world_market') else None
+            _cs = self.construction if hasattr(self, 'construction') else None
+            self.governance.update(dt * 10, npcs, self.time_sys.day,
+                                   world_market=_wm, construction=_cs)
 
         # Faction reputation & quest system — every 10th tick
         if self._sim_tick % 10 == 5:
@@ -887,6 +954,10 @@ class SimulationManager(SimCombatMixin, SimNeedsMixin, SimConversationsMixin,
                 npc_names=_nnames)
             for msg in self.quest_system.get_event_log():
                 self.event_log.append(msg)
+            # Refresh tavern quest boards
+            if hasattr(self, '_quest_board_mgr'):
+                self._quest_board_mgr.refresh_all(
+                    self.time_sys.day, player.level)
 
         # Hierarchical Command System (rulers issue orders, subordinates execute)
         _we = self.world_effects if hasattr(self, 'world_effects') else None
@@ -928,6 +999,13 @@ class SimulationManager(SimCombatMixin, SimNeedsMixin, SimConversationsMixin,
             for msg in self.trade.get_trade_log():
                 self.event_log.append(msg)
 
+        # Passive trade (daily road-based gold transfer) — once per game day
+        if self.time_sys.day != self._trade_last_day:
+            self._trade_last_day = self.time_sys.day
+            self.trade.passive_trade(self.world.structures, self.governance)
+            for msg in self.trade.get_trade_log():
+                self.event_log.append(msg)
+
         # Exhaustion & sleep — use itertools.chain to avoid list copy
         self.exhaustion.update(dt, itertools.chain(npcs, self.world_mgr.creatures), DAY_LENGTH)
 
@@ -954,6 +1032,38 @@ class SimulationManager(SimCombatMixin, SimNeedsMixin, SimConversationsMixin,
         if self._sim_tick % 10 == 8:
             self.ecology.update(dt * 10, self.time_sys.day, self.world, self.time_sys)
 
+        # Creature biological needs (hunger, thirst) — every tick (lightweight)
+        self.creature_needs.update(
+            self.world_mgr.creatures, self.world, dt,
+            creature_grid=self.creature_grid)
+
+        # Vegetation dynamics (tile recovery) — every tick (round-robin, 50 tiles)
+        self.vegetation_sys.update(dt, self.world, self.time_sys)
+
+        # Crop system visual updates — every tick (lightweight round-robin)
+        self.crop_system.update_visuals_tick()
+
+        # Crop system daily update — once per game day
+        if self.time_sys.day != self._crop_last_day:
+            self._crop_last_day = self.time_sys.day
+            _we = self.world_effects if hasattr(self, 'world_effects') else None
+            self.crop_system.update(
+                self.time_sys.day, self.time_sys.season,
+                self.world, world_effects=_we)
+
+        # Forest regrowth — once per game day
+        if self.time_sys.day != self._regrowth_last_day:
+            self._regrowth_last_day = self.time_sys.day
+            self.forest_regrowth.update(self.time_sys.day, self.world)
+
+        # Ecosystem feedback loops — internally throttled to ~5 seconds
+        _we = self.world_effects if hasattr(self, 'world_effects') else None
+        self.ecosystem_mgr.update(
+            dt, self.world, self.world_mgr.creatures, npcs,
+            self.time_sys, vegetation=self.vegetation_sys,
+            creature_grid=self.creature_grid, npc_grid=self.npc_grid,
+            world_effects=_we, event_log=self.event_log)
+
         # Climate model (pressure systems, disasters) — once per game day
         if hasattr(self, 'climate') and self.time_sys.day != self._climate_last_day:
             self._climate_last_day = self.time_sys.day
@@ -970,11 +1080,53 @@ class SimulationManager(SimCombatMixin, SimNeedsMixin, SimConversationsMixin,
             for msg in self.storyteller.get_event_log():
                 self.event_log.append(msg)
 
+        # Dynamic world events (emergent stories) — once per game day
+        if hasattr(self, 'dynamic_events') and self.time_sys.day != getattr(self, '_dynamic_events_last_day', -1):
+            self._dynamic_events_last_day = self.time_sys.day
+            _mil = self.military if hasattr(self, 'military') else None
+            self.dynamic_events.update(
+                self.time_sys.day, self.governance, self.world, npcs, _mil)
+            for msg in self.dynamic_events.get_event_log():
+                self.event_log.append(msg)
+
+        # Kingdom Strategic AI — once per game day, after storyteller
+        if hasattr(self, 'kingdom_ai') and self.time_sys.day != self._kingdom_ai_last_day:
+            self._kingdom_ai_last_day = self.time_sys.day
+            self.kingdom_ai.update(
+                self.time_sys.day, self.governance, self.military,
+                self.construction, self.world.structures, npcs)
+            for msg in self.kingdom_ai.get_event_log():
+                self.event_log.append(msg)
+
         # Construction (building projects) — every 10th tick
         if self._sim_tick % 10 == 9:
             self.construction.update(dt * 10, npcs, self.world)
             self.construction.auto_commission(self.governance, self.world, self.world.structures)
             for msg in self.construction.get_log():
+                self.event_log.append(msg)
+
+        # Settlement building construction (daily commissioning + progress)
+        if self.time_sys.day != self._construction_last_day:
+            self._construction_last_day = self.time_sys.day
+            self.construction.advance_building_projects(self.world.structures)
+            self.construction.auto_commission_buildings(
+                self.governance, self.world.structures)
+            # Road construction between growing settlements
+            _wp = getattr(self.world, 'plan', None)
+            self.construction.check_road_construction(
+                self.governance, self.world.structures, _wp)
+            self.construction.advance_road_projects(self.world, _wp)
+            for msg in self.construction.get_log():
+                self.event_log.append(msg)
+
+        # Mining system — once per game day, after kingdom AI
+        if hasattr(self, 'mining') and self.time_sys.day != self._mining_last_day:
+            self._mining_last_day = self.time_sys.day
+            _wp = getattr(self.world, 'plan', None)
+            self.mining.update(
+                self.time_sys.day, self.governance, self.kingdom_ai,
+                npcs, self.world.structures, _wp)
+            for msg in self.mining.get_event_log():
                 self.event_log.append(msg)
 
         # Culture (festivals, education, religion) — every 30th tick

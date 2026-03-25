@@ -2,8 +2,35 @@
 
 import random
 import math
-from typing import List, Dict, Optional, Tuple
+from typing import Any, List, Dict, Optional, Tuple
 from game.settings import *
+
+
+# ================================================================
+# LEVEL SCALING
+# ================================================================
+
+def scale_spell_damage(base_damage: int, caster_level: int) -> int:
+    """Scale spell damage with caster level: +10% per level."""
+    return int(base_damage * (1.0 + 0.1 * caster_level))
+
+
+def scale_spell_heal(base_heal: int, caster_level: int) -> int:
+    """Scale spell healing with caster level: base + 3 per level."""
+    return base_heal + caster_level * 3
+
+
+def scale_spell_range(base_range: float, caster_level: int) -> float:
+    """Scale spell range with caster level: +1 tile per 3 levels."""
+    return base_range + (caster_level // 3)
+
+
+def scale_spell_duration(base_duration: float, caster_level: int) -> float:
+    """Scale buff/debuff duration with caster level: +1s per 2 levels."""
+    if base_duration <= 0:
+        return base_duration
+    return base_duration + (caster_level // 2)
+
 
 def init_mana(entity):
     """Initialize mana attributes on a player or NPC.
@@ -129,6 +156,15 @@ def cast_spell(caster, spell_name: str, target=None,
 
     entities_nearby = entities_nearby or []
 
+    # Level scaling: compute scaled values for this cast
+    caster_level = getattr(caster, 'level', 1)
+    scaled_damage = scale_spell_damage(spell.damage, caster_level)
+    scaled_heal = scale_spell_heal(spell.heal, caster_level)
+    scaled_range = scale_spell_range(spell.range_tiles, caster_level)
+    scaled_duration = scale_spell_duration(spell.duration, caster_level)
+    scaled_status_duration = scale_spell_duration(
+        spell.status_duration, caster_level)
+
     # -- Resolve targets --
     targets_hit = []
     allies_hit = []
@@ -140,7 +176,7 @@ def cast_spell(caster, spell_name: str, target=None,
     elif spell.targets == "single":
         if target is not None:
             dist = _dist(caster, target)
-            if dist <= spell.range_tiles:
+            if dist <= scaled_range:
                 targets_hit = [target]
             else:
                 result["message"] = "Target out of range"
@@ -157,7 +193,7 @@ def cast_spell(caster, spell_name: str, target=None,
     elif spell.targets == "ally":
         if target is not None:
             dist = _dist(caster, target)
-            if dist <= spell.range_tiles:
+            if dist <= scaled_range:
                 allies_hit = [target]
             else:
                 result["message"] = "Target out of range"
@@ -169,12 +205,13 @@ def cast_spell(caster, spell_name: str, target=None,
             allies_hit = [caster]
 
     elif spell.targets == "aoe":
+        scaled_aoe = spell.area * (1.0 + 0.05 * caster_level) if spell.area > 0 else 0
         cx, cy = target_pos if target_pos else (caster.x, caster.y)
         for ent in entities_nearby:
             if not getattr(ent, 'alive', True):
                 continue
             d = math.sqrt((ent.x - cx) ** 2 + (ent.y - cy) ** 2)
-            if d <= spell.area:
+            if d <= scaled_aoe:
                 if spell.effect_type == "buff":
                     allies_hit.append(ent)
                 else:
@@ -209,10 +246,10 @@ def cast_spell(caster, spell_name: str, target=None,
     # -- Apply spell effects --
     messages = []
 
-    # Damage
+    # Damage (scaled by caster level)
     if spell.damage > 0:
         for t in targets_hit:
-            dmg = spell.damage
+            dmg = scaled_damage
             # Smite undead bonus
             if spell_name == "smite_undead":
                 mtype = getattr(t, 'monster_type', '')
@@ -239,7 +276,7 @@ def cast_spell(caster, spell_name: str, target=None,
             if not getattr(t, 'alive', True):
                 messages.append(f"{name} was slain!")
 
-    # Healing
+    # Healing (scaled by caster level)
     if spell.heal > 0:
         heal_targets = allies_hit if allies_hit else targets_hit
         for t in heal_targets:
@@ -247,16 +284,16 @@ def cast_spell(caster, spell_name: str, target=None,
             if spell_name == "resurrect":
                 if not getattr(t, 'alive', True):
                     t.alive = True
-                    t.hp = spell.heal
+                    t.hp = scaled_heal
                     name = getattr(t, 'name', 'target')
                     messages.append(f"{name} has been resurrected!")
-                    result["healing_done"][t] = spell.heal
+                    result["healing_done"][t] = scaled_heal
                 continue
 
             if not getattr(t, 'alive', True):
                 continue
             old_hp = t.hp
-            t.heal(spell.heal)
+            t.heal(scaled_heal)
             healed = t.hp - old_hp
             result["healing_done"][t] = healed
             name = getattr(t, 'name', getattr(t, 'kind', 'target'))
@@ -279,11 +316,11 @@ def cast_spell(caster, spell_name: str, target=None,
                 name = getattr(t, 'name', 'target')
                 messages.append(f"Cured {len(removed)} ailment(s) from {name}")
 
-    # Status effects (burn, slow, stun, root, pacify)
+    # Status effects (burn, slow, stun, root, pacify) — duration scaled by level
     if spell.status_effect:
         effect_targets = targets_hit
         for t in effect_targets:
-            eff = _make_status_effect(spell)
+            eff = _make_status_effect(spell, duration_override=scaled_status_duration)
             if not hasattr(t, 'active_spell_effects'):
                 t.active_spell_effects = []
             t.active_spell_effects.append(eff)
@@ -300,11 +337,11 @@ def cast_spell(caster, spell_name: str, target=None,
             t.x += (dx / dist) * spell.knockback
             t.y += (dy / dist) * spell.knockback
 
-    # Buff effects (bless, shield, sanctuary)
+    # Buff effects (bless, shield, sanctuary) — duration scaled by level
     if spell.effect_type == "buff" and spell.duration > 0:
         buff_targets = allies_hit if allies_hit else [caster]
         for t in buff_targets:
-            eff = _make_buff_effect(spell)
+            eff = _make_buff_effect(spell, duration_override=scaled_duration)
             if not hasattr(t, 'active_spell_effects'):
                 t.active_spell_effects = []
             t.active_spell_effects.append(eff)
@@ -327,13 +364,13 @@ def cast_spell(caster, spell_name: str, target=None,
         else:
             # Teleport in facing direction
             fx, fy = getattr(caster, 'facing', (0, 1))
-            caster.x += fx * spell.range_tiles
-            caster.y += fy * spell.range_tiles
+            caster.x += fx * scaled_range
+            caster.y += fy * scaled_range
             messages.append(f"Teleported forward!")
 
     if spell_name == "detect_magic":
         eff = SpellEffect("detect_magic", "detect_magic", 1.0,
-                          spell.duration, getattr(caster, 'name', ''))
+                          scaled_duration, getattr(caster, 'name', ''))
         if not hasattr(caster, 'active_spell_effects'):
             caster.active_spell_effects = []
         caster.active_spell_effects.append(eff)
@@ -371,7 +408,7 @@ def cast_spell(caster, spell_name: str, target=None,
     # -- Soul magic special handling --
     if spell_name == "soul_sight":
         eff = SpellEffect("soul_sight", "soul_sight", 1.0,
-                          spell.duration, getattr(caster, 'name', ''))
+                          scaled_duration, getattr(caster, 'name', ''))
         if not hasattr(caster, 'active_spell_effects'):
             caster.active_spell_effects = []
         caster.active_spell_effects.append(eff)
@@ -380,7 +417,7 @@ def cast_spell(caster, spell_name: str, target=None,
 
     if spell_name == "soul_ward":
         eff = SpellEffect("soul_ward", "soul_ward", spell.area,
-                          spell.duration, getattr(caster, 'name', ''))
+                          scaled_duration, getattr(caster, 'name', ''))
         if not hasattr(caster, 'active_spell_effects'):
             caster.active_spell_effects = []
         caster.active_spell_effects.append(eff)
@@ -395,8 +432,8 @@ def cast_spell(caster, spell_name: str, target=None,
         if target is not None:
             mtype = getattr(target, 'monster_type', '')
             if mtype == 'undead':
-                # Extra holy damage to undead
-                bonus = 20
+                # Extra holy damage to undead (scaled by level)
+                bonus = scale_spell_damage(20, caster_level)
                 actual = target.take_damage(bonus)
                 result["damage_dealt"][target] = result["damage_dealt"].get(target, 0) + actual
                 messages.append(f"Exorcism tears {actual} additional damage from the undead!")
@@ -504,12 +541,13 @@ def npc_choose_spell(npc, enemies: List, allies: List) -> Optional[Tuple[str, An
             return ("exorcism", nearest)
 
     # AoE preference
+    npc_level = getattr(npc, 'level', 1)
     if clustered >= 3:
         for sp_name in ["fireball", "earthquake", "storm_call"]:
             if sp_name in known:
                 ok, _ = can_cast(npc, sp_name)
                 spell = SPELL_REGISTRY.get(sp_name)
-                if ok and spell and dist <= spell.range_tiles:
+                if ok and spell and dist <= scale_spell_range(spell.range_tiles, npc_level):
                     return (sp_name, nearest)
 
     # Entangle if enemies are approaching
@@ -523,7 +561,7 @@ def npc_choose_spell(npc, enemies: List, allies: List) -> Optional[Tuple[str, An
         if sp_name in known:
             ok, _ = can_cast(npc, sp_name)
             spell = SPELL_REGISTRY.get(sp_name)
-            if ok and spell and dist <= spell.range_tiles:
+            if ok and spell and dist <= scale_spell_range(spell.range_tiles, npc_level):
                 return (sp_name, nearest)
 
     # Wind gust if enemy is very close

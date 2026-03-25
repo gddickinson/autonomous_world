@@ -22,6 +22,7 @@ from typing import List, Dict, Tuple, Optional
 from dataclasses import dataclass, field
 
 from game.settings import *
+from game.world.road_pathfinder import find_road_path
 
 
 # ================================================================
@@ -61,9 +62,19 @@ class RoadPlan:
 
 
 @dataclass
+class LakePlan:
+    """A lake feature — center, cells, and bounding radius."""
+    center: Tuple[int, int] = (0, 0)
+    cells: List[Tuple[int, int]] = field(default_factory=list)
+    radius: int = 0
+
+
+@dataclass
 class RiverPlan:
     """A river path from source to mouth."""
     points: List[Tuple[int, int]] = field(default_factory=list)
+    flow: int = 0           # max flow accumulation (for rendering width)
+    rank: str = "stream"    # 'major', 'medium', or 'stream'
 
 
 @dataclass
@@ -74,6 +85,7 @@ class SpecialLocation:
     x: int
     y: int
     radius: int
+    dungeon: object = None   # DungeonLayout, lazily generated for ruins/dungeons
 
 
 @dataclass
@@ -99,11 +111,19 @@ class WorldPlan:
     """
 
     def __init__(self, width: int, height: int, seed: int,
-                 use_history_sim: bool = False):
+                 use_history_sim: bool = False,
+                 use_ltp_settlements: bool = None):
         self.width = width
         self.height = height
         self.seed = seed
         self.use_history_sim = use_history_sim
+
+        # LTP settlement placement: default from settings, overridable
+        if use_ltp_settlements is None:
+            from game.settings import USE_LTP_SETTLEMENTS
+            self.use_ltp_settlements = USE_LTP_SETTLEMENTS
+        else:
+            self.use_ltp_settlements = use_ltp_settlements
 
         # Noise parameters (used by chunk generator for terrain)
         self.elevation_scale = 0.012     # lower = larger features for bigger world
@@ -114,6 +134,7 @@ class WorldPlan:
         self.settlements: List[SettlementPlan] = []
         self.roads: List[RoadPlan] = []
         self.rivers: List[RiverPlan] = []
+        self.lakes: List[LakePlan] = []
         self.regions: List[RegionPlan] = []
         self.special_locations: List[SpecialLocation] = []
 
@@ -161,20 +182,96 @@ class WorldPlan:
         # Resolution: 1 sample per 10 tiles = 1000x1000 for a 10,000 world.
         self._build_elevation_cache()
 
+        # New volcanic terrain: generate mountain spine, fill sinks, compute rivers
+        from game.settings import USE_NEW_TERRAIN
+        if USE_NEW_TERRAIN:
+            from game.world.terrain_gen import generate_spine, fill_sinks
+            from game.world.river_gen import (
+                compute_rivers, compute_lakes,
+                compute_flow_dir, compute_flow_accum,
+            )
+            from game.world.regional_climate import (
+                generate_mini_islands, plan_mini_island_settlements,
+                add_mini_island_elevation,
+            )
+            self._mountain_spine = generate_spine(
+                self.width, self.height, self.seed)
+
+            # Generate satellite mini-islands
+            self._mini_islands = generate_mini_islands(
+                self.width, self.height, self.seed)
+            # Update elevation cache with mini-island bumps
+            import numpy as np
+            step = self._elev_step
+            cw, ch = self._elev_cw, self._elev_ch
+            xs = np.arange(cw, dtype=np.float32) * step
+            ys = np.arange(ch, dtype=np.float32) * step
+            xx, yy = np.meshgrid(xs, ys)
+            self._elev_cache = add_mini_island_elevation(
+                xx, yy, self._elev_cache, self._mini_islands)
+            self._filled_elevation = fill_sinks(self._elev_cache)
+            flow_rivers = compute_rivers(
+                self._filled_elevation, sea_level=0.22,
+                cache_step=self._elev_step)
+            # Convert to RiverPlan objects with flow/rank metadata
+            for rd in flow_rivers:
+                self.rivers.append(RiverPlan(
+                    points=[(int(px), int(py)) for px, py in rd["points"]],
+                    flow=rd.get("flow", 0),
+                    rank=rd.get("rank", "stream")))
+            # Compute lakes in flat high-flow areas
+            fdir = compute_flow_dir(self._filled_elevation)
+            facc = compute_flow_accum(
+                self._filled_elevation, 0.22, fdir)
+            raw_lakes = compute_lakes(
+                self._filled_elevation, facc, fdir,
+                sea_level=0.22, cache_step=self._elev_step)
+            for lk in raw_lakes:
+                self.lakes.append(LakePlan(
+                    center=lk["center"],
+                    cells=lk["cells"],
+                    radius=lk["radius"]))
+
         self._plan_regions(rng)
-        self._plan_rivers(rng)
+        if not USE_NEW_TERRAIN:
+            self._plan_rivers(rng)
 
         if self.use_history_sim:
             # Use the history simulation for settlements, roads, kingdoms
             self._plan_settlements_simulated(rng, years=500,
                                              progress_callback=progress_callback)
+        elif self.use_ltp_settlements:
+            # Use terrain-driven LTP model for emergent settlement placement
+            self._plan_settlements_ltp(rng)
         else:
             self._plan_settlements(rng)
             self._plan_roads(rng)
 
+        # Nudge any settlements whose centres are too close to water
+        self._nudge_settlements_from_water()
+
+        # Add mini-island settlements (fishing hamlets/villages)
+        if USE_NEW_TERRAIN and hasattr(self, '_mini_islands'):
+            island_settles = plan_mini_island_settlements(
+                self._mini_islands, self.seed)
+            for sd in island_settles:
+                self.settlements.append(SettlementPlan(
+                    name=sd["name"], kind=sd["kind"],
+                    x=sd["x"], y=sd["y"],
+                    radius=sd["radius"],
+                    region="island",
+                    race="human",
+                    population=15 if sd["kind"] == "hamlet" else 30,
+                    specialization=sd["specialization"],
+                ))
+
         self._plan_special_locations(rng)
         self._plan_test_island()
         self._plan_spawn_temple()
+
+        # Pre-generate all settlement building layouts during loading
+        # (avoids expensive Voronoi/zone computation during chunk loading)
+        self._pregenerate_settlement_layouts(rng, progress_callback)
 
         if not self.use_history_sim:
             # History sim already sets up kingdoms
@@ -211,7 +308,6 @@ class WorldPlan:
         Used for fast land/water checks during settlement placement.
         """
         import numpy as np
-        from game.world.chunk_generator import _fbm_vec
 
         step = 10
         self._elev_step = step
@@ -222,15 +318,21 @@ class WorldPlan:
         ys = np.arange(ch, dtype=np.float32) * step
         xx, yy = np.meshgrid(xs, ys)
 
-        elev = _fbm_vec(xx * self.elevation_scale,
-                         yy * self.elevation_scale,
-                         octaves=5, seed=self.seed)
-
-        # Apply edge falloff
-        edge_dx = (xx / self.width - 0.5) * 2
-        edge_dy = (yy / self.height - 0.5) * 2
-        edge_dist = np.sqrt(edge_dx**2 + edge_dy**2)
-        elev *= np.maximum(0.0, 1.0 - edge_dist * self.edge_falloff_strength)
+        from game.settings import USE_NEW_TERRAIN
+        if USE_NEW_TERRAIN:
+            from game.world.terrain_gen import island_elevation, mountain_elevation
+            elev = island_elevation(xx, yy, self.width, self.height, self.seed)
+            # Mountain spine added later in generate() after this cache exists
+        else:
+            from game.world.chunk_generator import _fbm_vec
+            elev = _fbm_vec(xx * self.elevation_scale,
+                             yy * self.elevation_scale,
+                             octaves=5, seed=self.seed)
+            # Apply edge falloff (legacy circular island)
+            edge_dx = (xx / self.width - 0.5) * 2
+            edge_dy = (yy / self.height - 0.5) * 2
+            edge_dist = np.sqrt(edge_dx**2 + edge_dy**2)
+            elev *= np.maximum(0.0, 1.0 - edge_dist * self.edge_falloff_strength)
 
         self._elev_cache = elev  # numpy array [ch, cw]
         self._elev_cw = cw
@@ -639,7 +741,50 @@ class WorldPlan:
         return path
 
     # ------------------------------------------------------------------
-    # Settlement planning
+    # Pre-generate settlement layouts (runs during loading screen)
+    # ------------------------------------------------------------------
+
+    def _pregenerate_settlement_layouts(self, rng, progress_callback=None):
+        """Pre-generate building layouts for all settlements.
+
+        This runs during the loading screen so that chunk generation
+        never needs to compute layouts (which can be slow for Voronoi).
+        """
+        from game.world.chunk_generator import _generate_settlement_buildings
+        total = len(self.settlements)
+        for i, sp in enumerate(self.settlements):
+            if not sp.buildings:
+                s_rng = random.Random(self.seed ^ hash(sp.name))
+                _generate_settlement_buildings(sp, self, s_rng)
+            if progress_callback and i % 10 == 0:
+                progress_callback(
+                    f"Building settlements... ({i+1}/{total})",
+                    0.5 + 0.4 * i / max(1, total))
+
+    # ------------------------------------------------------------------
+    # Settlement planning (LTP model)
+    # ------------------------------------------------------------------
+
+    def _plan_settlements_ltp(self, rng: random.Random):
+        """Use LTP (Landscape-Transport-Population) model for placement.
+
+        Terrain-driven emergent settlement placement: simulates how
+        populations concentrate at transport-advantageous locations.
+        Also extracts trade routes from the transport connectivity.
+        """
+        from game.world.ltp_settlement import LTPSettlementPlacer
+
+        placer = LTPSettlementPlacer(self, rng)
+        self.settlements = placer.generate()
+        self.roads = placer.get_trade_routes()
+
+        # If LTP didn't produce enough roads (edge case with very few
+        # settlements), fall back to MST road planning
+        if len(self.roads) < max(1, len(self.settlements) - 1):
+            self._plan_roads(rng)
+
+    # ------------------------------------------------------------------
+    # Settlement planning (legacy random)
     # ------------------------------------------------------------------
 
     def _plan_settlements(self, rng: random.Random):
@@ -904,8 +1049,8 @@ class WorldPlan:
             road_type = {4: "king_road", 3: "paved_road",
                          2: "gravel_road", 1: "dirt_track"}[imp]
 
-            # Generate waypoints (Bresenham-ish with slight curves)
-            waypoints = self._road_waypoints(x1, y1, x2, y2, rng)
+            # Generate terrain-aware waypoints via A* pathfinding
+            waypoints = find_road_path(self, x1, y1, x2, y2)
 
             self.roads.append(RoadPlan(
                 start_name=n1, end_name=n2,
@@ -914,14 +1059,17 @@ class WorldPlan:
 
     def _road_waypoints(self, x1: int, y1: int, x2: int, y2: int,
                         rng: random.Random) -> List[Tuple[int, int]]:
-        """Generate waypoints between two points with natural curves."""
+        """Legacy fallback: generate waypoints with linear interpolation.
+
+        No longer used for inter-settlement roads (replaced by A*
+        pathfinder in road_pathfinder.py). Kept for any other callers.
+        """
         points = [(x1, y1)]
         dist = math.sqrt((x2 - x1)**2 + (y2 - y1)**2)
         segments = max(3, int(dist / 50))
 
         for i in range(1, segments):
             t = i / segments
-            # Lerp with random offset for natural curves
             mx = x1 + (x2 - x1) * t + rng.randint(-15, 15)
             my = y1 + (y2 - y1) * t + rng.randint(-15, 15)
             mx = max(5, min(self.width - 5, mx))
@@ -930,6 +1078,74 @@ class WorldPlan:
 
         points.append((x2, y2))
         return points
+
+    # ------------------------------------------------------------------
+    # Settlement water-nudge pass
+    # ------------------------------------------------------------------
+
+    def _nudge_settlements_from_water(self):
+        """Push settlement centres inland if they sit near water.
+
+        Checks a ring of sample points at radius*0.3 around the centre.
+        If any sample is below sea level (elev < 0.23), nudge the centre
+        away from the average water direction until it's safe. This prevents
+        settlements from generating buildings that overlap water.
+        """
+        water_elev = 0.23
+        for sp in self.settlements:
+            check_dist = max(10, int(sp.radius * 0.3))
+            n_samples = 8
+            for _attempt in range(5):
+                # Sample points in a ring around the centre
+                water_dx, water_dy = 0.0, 0.0
+                water_count = 0
+                for i in range(n_samples):
+                    angle = 2 * math.pi * i / n_samples
+                    sx = int(sp.x + check_dist * math.cos(angle))
+                    sy = int(sp.y + check_dist * math.sin(angle))
+                    if self.get_elevation_fast(sx, sy) < water_elev:
+                        # Accumulate direction toward water
+                        water_dx += math.cos(angle)
+                        water_dy += math.sin(angle)
+                        water_count += 1
+
+                # Also check the centre itself
+                if self.get_elevation_fast(sp.x, sp.y) < water_elev:
+                    water_count += n_samples  # force a strong nudge
+
+                if water_count == 0:
+                    break  # settlement is safe
+
+                # Nudge away from water direction
+                mag = math.sqrt(water_dx ** 2 + water_dy ** 2)
+                if mag > 0.01:
+                    # Move opposite to the water direction
+                    nudge = max(5, check_dist // 2)
+                    sp.x = int(sp.x - (water_dx / mag) * nudge)
+                    sp.y = int(sp.y - (water_dy / mag) * nudge)
+                else:
+                    # Water all around — nudge toward higher ground
+                    best_elev = -1.0
+                    best_dx, best_dy = 0, 0
+                    for i in range(n_samples):
+                        angle = 2 * math.pi * i / n_samples
+                        sx = int(sp.x + check_dist * math.cos(angle))
+                        sy = int(sp.y + check_dist * math.sin(angle))
+                        e = self.get_elevation_fast(sx, sy)
+                        if e > best_elev:
+                            best_elev = e
+                            best_dx = sx - sp.x
+                            best_dy = sy - sp.y
+                    if best_elev >= water_elev:
+                        sp.x += best_dx
+                        sp.y += best_dy
+                    else:
+                        break  # can't fix — island settlement
+
+                # Clamp to world bounds
+                margin = sp.radius + 20
+                sp.x = max(margin, min(self.width - margin, sp.x))
+                sp.y = max(margin, min(self.height - margin, sp.y))
 
     # ------------------------------------------------------------------
     # Special locations
@@ -1320,8 +1536,10 @@ class WorldPlan:
 
         Professions are drawn from the settlement's specialization pool
         so that a mining town is mostly miners, a port is mostly sailors, etc.
+        Character class is derived from the profession via JOB_TO_CLASS.
         """
         from game.data.dnd import random_npc_class_and_race
+        from game.data.job_classes import get_class_for_job
         from game.settings import NPC_NAMES, PROFESSIONS
         from game.world.specializations import SPECIALIZATION_PROFESSIONS
 
@@ -1334,12 +1552,19 @@ class WorldPlan:
         rng.shuffle(name_pool)
         name_idx = [0]
 
+        # Extra name parts for generating overflow names
+        _prefixes = ["Al", "Br", "Cor", "Da", "El", "Fa", "Gar", "Ha", "Is", "Ja",
+                      "Ka", "Li", "Ma", "Na", "Or", "Pe", "Ra", "Sa", "Ta", "Va"]
+        _suffixes = ["an", "en", "in", "on", "ar", "er", "ir", "or", "ia", "ea",
+                      "ith", "eth", "wyn", "ric", "iel", "ael", "orn", "ard", "ius", "eus"]
+
         def next_name():
             if name_idx[0] < len(name_pool):
                 n = name_pool[name_idx[0]]
                 name_idx[0] += 1
                 return n
-            return f"NPC_{rng.randint(1000, 9999)}"
+            # Generate a plausible fantasy name instead of "NPC_1234"
+            return rng.choice(_prefixes) + rng.choice(_suffixes)
 
         for settlement in self.settlements:
             # Get specialization-aware profession pool
@@ -1354,7 +1579,8 @@ class WorldPlan:
                 prof_weights = None
 
             for i in range(settlement.population):
-                cls, race = random_npc_class_and_race()
+                # Pick race (settlement race 70% of the time)
+                _, race = random_npc_class_and_race()
                 if settlement.race and rng.random() < 0.7:
                     race = settlement.race
 
@@ -1369,6 +1595,9 @@ class WorldPlan:
                     role = rng.choices(prof_names, weights=prof_weights, k=1)[0]
                 else:
                     role = rng.choice(PROFESSIONS)
+
+                # Derive D&D class from profession instead of random
+                cls = get_class_for_job(role)
 
                 self.npc_roster.append({
                     "name": next_name(),
@@ -1457,7 +1686,11 @@ class WorldPlan:
             f"{sum(1 for s in self.settlements if s.kind == 'hamlet')} hamlets)",
             f"Specializations: {spec_str}",
             f"Roads: {len(self.roads)}",
-            f"Rivers: {len(self.rivers)}",
+            f"Rivers: {len(self.rivers)} "
+            f"({sum(1 for r in self.rivers if r.rank == 'major')} major, "
+            f"{sum(1 for r in self.rivers if r.rank == 'medium')} medium, "
+            f"{sum(1 for r in self.rivers if r.rank == 'stream')} streams)",
+            f"Lakes: {len(self.lakes)}",
             f"Special locations: {len(self.special_locations)}",
             f"Kingdoms: {len(self.kingdoms)}",
             f"Foreign contacts: {len(self.foreign_contacts)}",

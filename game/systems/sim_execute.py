@@ -12,6 +12,18 @@ from game.settings import *
 class SimExecuteMixin:
     """The _execute_action dispatcher — maps LLM decisions to game actions."""
 
+    def _fallback_work_in_place(self, npc: NPC, action_label: str,
+                                 reason: str = "working"):
+        """When a scheduled work action can't find a zone, have the NPC
+        work near home instead of going idle.  This prevents the
+        idle-loop where NPCs with jobs never actually work."""
+        npc.state = "working"
+        npc.current_action = action_label
+        npc.action_timer = random.uniform(8.0, 15.0)
+        npc.target_x = npc.home_x + random.uniform(-3, 3)
+        npc.target_y = npc.home_y + random.uniform(-3, 3)
+        npc.current_goal = reason
+
     def _execute_action(self, npc: NPC, action: str, target: str, reason: str):
         action = action.split()[0]  # Just the first word
         # Clear stale movement targets so timed actions don't get stuck
@@ -143,7 +155,9 @@ class SimExecuteMixin:
         elif action == "IDLE":
             npc.current_action = "idle"
             npc.state = "idle"
-            npc.state_timer = random.uniform(3, 8)
+            npc.state_timer = random.uniform(1, 3)
+            # Short idle — decision timer resets quickly so NPC finds work
+            npc.llm_decision_timer = random.uniform(0.5, 1.5)
 
         elif action == "APPROACH_PLAYER":
             # Move toward player to initiate conversation
@@ -291,30 +305,33 @@ class SimExecuteMixin:
             zone = self._find_zone_for_npc(npc, "training_ground")
             if zone:
                 npc.target_x, npc.target_y = zone.center
-                npc.state = "working"
-                npc.current_action = "training"
-                npc.action_timer = NPC_TRAIN_TIME
-                # Determine which combat skill to train
-                combat_skill = "swordsmanship"
-                if npc.npc_skills.get("archery", 0) > npc.npc_skills.get("swordsmanship", 0):
-                    combat_skill = "archery"
-                elif npc.npc_skills.get("unarmed", 0) > npc.npc_skills.get("swordsmanship", 0):
-                    combat_skill = "unarmed"
-                npc.action_target = combat_skill
             else:
-                npc.current_action = ""
+                # Train near home if no training ground exists
+                npc.target_x = npc.home_x + random.uniform(-4, 4)
+                npc.target_y = npc.home_y + random.uniform(-4, 4)
+            npc.state = "working"
+            npc.current_action = "training"
+            npc.action_timer = NPC_TRAIN_TIME
+            # Determine which combat skill to train
+            combat_skill = "swordsmanship"
+            if npc.npc_skills.get("archery", 0) > npc.npc_skills.get("swordsmanship", 0):
+                combat_skill = "archery"
+            elif npc.npc_skills.get("unarmed", 0) > npc.npc_skills.get("swordsmanship", 0):
+                combat_skill = "unarmed"
+            npc.action_target = combat_skill
 
         elif action == "TRAIN_ARCHERY":
             from game.systems.skills import gain_skill_xp
             zone = self._find_zone_for_npc(npc, "archery_range")
-            if zone and (npc.npc_has_item("Hunting Bow") or npc.npc_has_item("Arrows")):
+            if zone:
                 npc.target_x, npc.target_y = zone.center
-                npc.state = "working"
-                npc.current_action = "training"
-                npc.action_timer = NPC_TRAIN_TIME
-                npc.action_target = "archery"
             else:
-                npc.current_action = ""
+                npc.target_x = npc.home_x + random.uniform(-4, 4)
+                npc.target_y = npc.home_y + random.uniform(-4, 4)
+            npc.state = "working"
+            npc.current_action = "training"
+            npc.action_timer = NPC_TRAIN_TIME
+            npc.action_target = "archery"
 
         elif action in ("GUARD_WALL", "GUARD_GATE", "GUARD_TOWER", "PATROL", "SCOUT"):
             # Military duty actions — move to defensive position
@@ -370,7 +387,10 @@ class SimExecuteMixin:
                 if action == "PATROL":
                     gain_skill_xp(npc, "navigation", 0.15)
             else:
-                npc.current_action = ""
+                # No home settlement found — patrol near home position
+                angle = random.uniform(0, 2 * math.pi)
+                npc.target_x = npc.home_x + math.cos(angle) * 8
+                npc.target_y = npc.home_y + math.sin(angle) * 8
 
         elif action == "PERFORM":
             from game.systems.skills import skill_check, gain_skill_xp
@@ -413,18 +433,20 @@ class SimExecuteMixin:
             zone = self._find_zone_for_npc(npc, "library")
             if zone:
                 npc.target_x, npc.target_y = zone.center
-                npc.state = "working"
-                npc.current_action = "researching"
-                npc.action_timer = NPC_RESEARCH_TIME
-                # Pick research topic based on class
-                if npc.is_spellcaster:
-                    npc.action_target = "arcana"
-                elif npc.char_class in ("Cleric", "Paladin"):
-                    npc.action_target = "religion"
-                else:
-                    npc.action_target = "history"
             else:
-                npc.current_action = ""
+                # Study at home if no library
+                npc.target_x = npc.home_x
+                npc.target_y = npc.home_y
+            npc.state = "working"
+            npc.current_action = "researching"
+            npc.action_timer = NPC_RESEARCH_TIME
+            # Pick research topic based on class
+            if npc.is_spellcaster:
+                npc.action_target = "arcana"
+            elif npc.char_class in ("Cleric", "Paladin"):
+                npc.action_target = "religion"
+            else:
+                npc.action_target = "history"
 
         elif action == "PRAY":
             from game.systems.skills import skill_check, gain_skill_xp
@@ -596,24 +618,27 @@ class SimExecuteMixin:
             zone = self._find_zone_for_npc(npc, "stable")
             if zone:
                 npc.target_x, npc.target_y = zone.center
-                npc.state = "working"
-                npc.current_action = "training_animal"
-                npc.action_timer = NPC_TRAIN_TIME
-                npc.action_target = "animal_training"
             else:
-                npc.current_action = ""
+                npc.target_x = npc.home_x + random.uniform(-5, 5)
+                npc.target_y = npc.home_y + random.uniform(-5, 5)
+            npc.state = "working"
+            npc.current_action = "training_animal"
+            npc.action_timer = NPC_TRAIN_TIME
+            npc.action_target = "animal_training"
 
         elif action == "PERFORM_RITUAL":
             from game.systems.skills import skill_check, gain_skill_xp
             zone = self._find_zone_for_npc(npc, "ritual_circle")
-            if zone and getattr(npc, 'is_spellcaster', False):
+            if zone:
                 npc.target_x, npc.target_y = zone.center
-                npc.state = "working"
-                npc.current_action = "ritual"
-                npc.action_timer = NPC_RITUAL_TIME
-                npc.action_target = "ritual_magic"
             else:
-                npc.current_action = ""
+                # Perform ritual in a quiet spot near home
+                npc.target_x = npc.home_x + random.uniform(-3, 3)
+                npc.target_y = npc.home_y + random.uniform(-3, 3)
+            npc.state = "working"
+            npc.current_action = "ritual" if getattr(npc, 'is_spellcaster', False) else "praying"
+            npc.action_timer = NPC_RITUAL_TIME if getattr(npc, 'is_spellcaster', False) else 4.0
+            npc.action_target = "ritual_magic"
 
         elif action == "SET_WARD":
             from game.systems.skills import skill_check, gain_skill_xp
@@ -660,7 +685,9 @@ class SimExecuteMixin:
                 npc.action_timer = NPC_ENCHANT_TIME
                 npc.action_target = "enchanting"
             else:
-                npc.current_action = ""
+                # Study enchantment theory at home
+                self._fallback_work_in_place(npc, "researching",
+                                              "studying enchantment theory")
 
         elif action == "MAKE_MAP":
             from game.systems.skills import skill_check, gain_skill_xp
@@ -687,7 +714,8 @@ class SimExecuteMixin:
                 npc.action_timer = NPC_CRAFT_TIME
                 npc.action_target = "pottery"
             else:
-                npc.current_action = ""
+                self._fallback_work_in_place(npc, "working",
+                                              "preparing pottery workspace")
 
         elif action == "CRAFT_GLASS":
             from game.systems.skills import gain_skill_xp
@@ -699,7 +727,8 @@ class SimExecuteMixin:
                 npc.action_timer = NPC_CRAFT_TIME
                 npc.action_target = "glassblowing"
             else:
-                npc.current_action = ""
+                self._fallback_work_in_place(npc, "working",
+                                              "preparing glassworks")
 
         elif action == "TAN_HIDE":
             from game.systems.skills import gain_skill_xp
@@ -711,7 +740,8 @@ class SimExecuteMixin:
                 npc.action_timer = NPC_CRAFT_TIME
                 npc.action_target = "tanning"
             else:
-                npc.current_action = ""
+                self._fallback_work_in_place(npc, "working",
+                                              "preparing hides")
 
         elif action == "DYE_CLOTH":
             from game.systems.skills import gain_skill_xp
@@ -723,7 +753,8 @@ class SimExecuteMixin:
                 npc.action_timer = NPC_CRAFT_TIME
                 npc.action_target = "dyeing"
             else:
-                npc.current_action = ""
+                self._fallback_work_in_place(npc, "working",
+                                              "sorting cloth")
 
         elif action in ("JOKE_WITH", "COMFORT", "ARGUE_WITH", "INTIMIDATE",
                         "SHARE_MEAL", "FLIRT_WITH", "CHALLENGE", "SPAR_WITH"):

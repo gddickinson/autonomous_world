@@ -379,6 +379,29 @@ class SimActionsMixin(SimExecuteMixin):
                 npc.add_memory("work", f"Chopped a tree, got {wood.count} wood", 1)
                 npc.daily_builds += 1
                 gain_skill_xp(npc, "woodcraft", 1.0)
+                # Track stump for forest regrowth system
+                if hasattr(self, 'forest_regrowth'):
+                    self.forest_regrowth.on_tree_cleared(
+                        tx, ty, self.time_sys.day, was_dense=False)
+                # Clear 1-2 nearby FOREST/DENSE_FOREST tiles to GRASS (land clearing)
+                cleared = 0
+                max_clear = random.randint(1, 2)
+                for dx in range(-2, 3):
+                    for dy in range(-2, 3):
+                        if cleared >= max_clear:
+                            break
+                        nx, ny = tx + dx, ty + dy
+                        if (nx, ny) != (tx, ty) and 0 <= nx < self.world.width and 0 <= ny < self.world.height:
+                            was_dense = self.world.tiles[ny][nx] == DENSE_FOREST
+                            if self.world.tiles[ny][nx] in (FOREST, DENSE_FOREST):
+                                self.world.modify_tile(nx, ny, GRASS)
+                                if hasattr(self, 'forest_regrowth'):
+                                    self.forest_regrowth.on_tree_cleared(
+                                        nx, ny, self.time_sys.day,
+                                        was_dense=was_dense)
+                                cleared += 1
+                    if cleared >= max_clear:
+                        break
 
         elif action == "mining":
             from game.systems.skills import skill_check
@@ -425,6 +448,27 @@ class SimActionsMixin(SimExecuteMixin):
                     self.world.modify_tile(tx, ty, TILLED_SOIL)
                     npc.npc_remove_item("Seeds")
                     npc.add_memory("work", "Planted seeds", 1)
+                # Register with crop system
+                crop_type = random.choice(["wheat", "barley", "vegetables"])
+                if hasattr(self, 'crop_system'):
+                    self.crop_system.plant_crop(
+                        tx, ty, self.time_sys.day, crop_type)
+                # Convert 1-3 nearby GRASS tiles to FARMLAND (tilling)
+                converted = 0
+                for dx in range(-2, 3):
+                    for dy in range(-2, 3):
+                        if converted >= random.randint(1, 3):
+                            break
+                        nx, ny = tx + dx, ty + dy
+                        if (nx, ny) != (tx, ty) and 0 <= nx < self.world.width and 0 <= ny < self.world.height:
+                            if self.world.tiles[ny][nx] == GRASS:
+                                self.world.modify_tile(nx, ny, FARMLAND)
+                                if hasattr(self, 'crop_system'):
+                                    self.crop_system.register_farmland(
+                                        nx, ny, crop_type)
+                                converted += 1
+                    if converted >= 3:
+                        break
             elif sub == "harvest":
                 tx, ty = int(npc.x), int(npc.y)
                 if self.world.tiles[ty][tx] in (FARMLAND, TILLED_SOIL):

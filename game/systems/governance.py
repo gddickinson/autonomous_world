@@ -268,7 +268,7 @@ class GovernanceSystem:
             num_settlements = len(kingdom.settlements)
             kingdom.army_size = max(5, num_settlements * 3 + random.randint(2, 10))
             kingdom.guard_count = max(2, kingdom.army_size // 2)
-            kingdom.army_upkeep = kingdom.army_size * 2
+            kingdom.army_upkeep = kingdom.army_size * 0.5
 
             # Count actual military NPCs if loaded
             for npc in npcs:
@@ -468,7 +468,7 @@ class GovernanceSystem:
                         kingdom.army_size += 1
                         kingdom.guard_count += 1
 
-            kingdom.army_upkeep = kingdom.army_size * 2  # 2 gold per soldier per day
+            kingdom.army_upkeep = kingdom.army_size * 0.5  # 2 gold per soldier per day
 
             # Find heir (duke or eldest knight family member)
             if ruler:
@@ -499,13 +499,15 @@ class GovernanceSystem:
                 rel.update_status()
                 self.diplomacy[key] = rel
 
-    def update(self, dt: float, npcs: list, day: int):
+    def update(self, dt: float, npcs: list, day: int, world_market=None,
+               construction=None):
         """Periodic governance updates."""
         # Tax collection every game-day
         self.tax_timer += dt
         if self.tax_timer > 60.0:  # every minute ≈ 1 game day
             self.tax_timer = 0.0
-            self._collect_taxes(npcs)
+            self._collect_taxes(npcs, world_market=world_market,
+                                construction=construction)
 
         # Political events every 3 minutes
         self.governance_timer += dt
@@ -515,12 +517,23 @@ class GovernanceSystem:
             self._political_events(npcs, day)
             self._check_succession(npcs, day)
 
-    def _collect_taxes(self, npcs: list):
-        """Collect taxes from NPCs in each kingdom's territory."""
+    def _collect_taxes(self, npcs: list, world_market=None, construction=None):
+        """Collect taxes from NPCs, settlement GDP, and base income."""
+        # Base income per settlement type
+        SETTLEMENT_BASE_INCOME = {
+            "hamlet": 5, "village": 15, "town": 40, "city": 100, "castle": 25,
+        }
+        # Building income bonuses (mirrors kingdom_ai.py BUILDING_INCOME_BONUSES)
+        BUILDING_TAX_BONUSES = {
+            "market": 0.15, "warehouse": 0.10, "granary": 0.05,
+            "workshop": 0.20, "guild_hall": 0.10, "smithy": 0.05,
+        }
+
         for name, kingdom in self.kingdoms.items():
             tax_income = 0
             taxpayers = 0
 
+            # --- NPC personal taxes ---
             for npc in npcs:
                 if not npc.alive:
                     continue
@@ -534,12 +547,44 @@ class GovernanceSystem:
                         tax_income += tax
                         taxpayers += 1
 
-            # Pay army upkeep
-            expenses = kingdom.army_upkeep
+            # --- Settlement GDP tax (primary income source) ---
+            if world_market:
+                for sname in kingdom.settlements:
+                    settlement_eco = world_market.get_settlement_economy(sname)
+                    if settlement_eco:
+                        gdp_tax = settlement_eco.gdp * kingdom.tax_rate * 0.5
+                        tax_income += gdp_tax
+
+            # --- Base income per settlement (minimum income floor) ---
+            if world_market:
+                for sname in kingdom.settlements:
+                    settlement_eco = world_market.get_settlement_economy(sname)
+                    if settlement_eco:
+                        base = SETTLEMENT_BASE_INCOME.get(settlement_eco.kind, 5)
+                        tax_income += base
+            else:
+                # Fallback: estimate from settlement count
+                tax_income += len(kingdom.settlements) * 10
+
+            # --- Building income bonuses (Fix 4) ---
+            # Additive: sum all building bonuses then apply once
+            if construction and hasattr(construction, 'settlement_buildings'):
+                building_bonus = 0.0
+                for sname in kingdom.settlements:
+                    buildings = construction.settlement_buildings.get(sname, [])
+                    for btype in buildings:
+                        building_bonus += BUILDING_TAX_BONUSES.get(btype, 0)
+                if building_bonus > 0:
+                    tax_income *= (1.0 + building_bonus)
+
+            # --- Army upkeep: 0.5 gold/soldier/day (food/weapons from stockpiles) ---
+            expenses = kingdom.army_size * 0.5
+
             kingdom.treasury += tax_income - expenses
-            kingdom.treasury = max(0, kingdom.treasury)
+            kingdom.treasury = max(0, round(kingdom.treasury, 2))
             kingdom.income_per_day = tax_income
             kingdom.expenses_per_day = expenses
+            kingdom.army_upkeep = expenses
 
             # Morale effects from taxation
             law = LAWS.get(kingdom.active_law, LAWS["normal_tax"])

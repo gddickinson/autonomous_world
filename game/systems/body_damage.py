@@ -32,9 +32,9 @@ DAMAGE_TYPES: Dict[str, dict] = {
     "frost":   {"bleed": False, "infection_risk": 0.1,  "heal_days": 25,
                 "armor_factor": 0.6},
     "poison":  {"bleed": False, "infection_risk": 0.0,  "heal_days": 10,
-                "systemic": True},
+                "armor_factor": 0.0, "systemic": True},
     "necrotic": {"bleed": False, "infection_risk": 0.0, "heal_days": 999,
-                 "divine_only": True},
+                 "armor_factor": 0.0, "divine_only": True},
 }
 
 # Body-part targeting weights when no specific part is given.

@@ -10,3 +10,5 @@
 /game/world/__pycache__
 /game/ui/creatures/__pycache__
 /viewers/__pycache__
+/game/audio/__pycache__
+.DS_Store

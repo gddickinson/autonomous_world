@@ -7,14 +7,182 @@ from game.core.npc import NPC
 from game.settings import *
 
 
+def _estimate_threat(attacker, witness):
+    """Estimate how threatening the attacker is relative to the witness.
+
+    Returns a ratio: > 2.0 = overwhelming, 1.0 = equal, < 0.5 = weak.
+    """
+    atk_level = getattr(attacker, 'level', 1)
+    atk_hp = getattr(attacker, 'hp', 50)
+    atk_max = getattr(attacker, 'max_hp', 50)
+    wit_level = getattr(witness, 'level', 1)
+    wit_hp = getattr(witness, 'hp', 50)
+    # Level difference is the strongest signal
+    level_ratio = atk_level / max(1, wit_level)
+    # HP pool suggests toughness
+    hp_ratio = atk_max / max(1, getattr(witness, 'max_hp', 50))
+    # Combined threat estimate
+    return (level_ratio * 0.7 + hp_ratio * 0.3)
+
+
+def _count_nearby_allies(npc, npc_grid, radius=10):
+    """Count alive, non-fleeing NPCs near this NPC (potential allies)."""
+    count = 0
+    for other in npc_grid.get_nearby(npc.x, npc.y, radius):
+        if other.alive and other is not npc:
+            if getattr(other, 'state', '') != 'fleeing':
+                count += 1
+    return count
+
+
+def _trigger_flee(npc, danger_x, danger_y, flee_dist=15):
+    """Make an NPC flee away from a danger location."""
+    if not npc.alive:
+        return
+    dx = npc.x - danger_x
+    dy = npc.y - danger_y
+    dist = math.sqrt(dx * dx + dy * dy) or 1.0
+    npc.target_x = npc.x + (dx / dist) * flee_dist
+    npc.target_y = npc.y + (dy / dist) * flee_dist
+    npc.current_action = "fleeing"
+    npc.state = "fleeing"
+    npc._action_timer = 5.0
+    npc._decision_timer = 5.0
+
+
+def _trigger_attack(npc, attacker):
+    """Make an NPC engage the attacker in combat."""
+    if not npc.alive:
+        return
+    npc.combat_target = attacker
+    npc.current_action = "fighting"
+    npc.state = "combat"
+    npc._action_timer = 0.0
+    npc._decision_timer = 0.0
+
+
+def _trigger_call_guards(npc, attacker, npc_grid):
+    """NPC calls for guards — nearby guards switch to attack the threat."""
+    if not npc.alive:
+        return
+    npc.current_action = "calling for help"
+    npc._action_timer = 2.0
+    for guard in npc_grid.get_nearby(npc.x, npc.y, 20):
+        if not guard.alive or guard is npc:
+            continue
+        prof = getattr(guard, 'profession', '').lower()
+        if prof in ('guard', 'soldier', 'captain', 'knight'):
+            _trigger_attack(guard, attacker)
+
+
+def _trigger_surrender(npc):
+    """NPC surrenders — kneels and stops fighting."""
+    if not npc.alive:
+        return
+    npc.current_action = "surrendering"
+    npc.state = "surrendered"
+    npc.combat_target = None
+    npc._action_timer = 10.0
+    npc._decision_timer = 10.0
+
+
+def _respond_to_threat(npc, attacker, npc_grid):
+    """Decide how an NPC responds to witnessing violence based on threat assessment.
+
+    Responses vary by profession, threat level, and nearby allies:
+    - Overwhelming threat (god-like): flee or surrender
+    - Strong threat (outnumbered): flee + call guards
+    - Moderate threat (even odds): guards attack, civilians call for help
+    - Weak threat (NPC is stronger): attack directly
+    """
+    if not npc.alive:
+        return
+
+    prof = getattr(npc, 'profession', '').lower()
+    is_combatant = prof in ('guard', 'soldier', 'captain', 'knight',
+                            'hunter', 'ranger', 'mercenary')
+    threat = _estimate_threat(attacker, npc)
+    allies = _count_nearby_allies(npc, npc_grid, 12)
+    bravery = 0.5  # base
+    # Combatants are braver
+    if is_combatant:
+        bravery += 0.3
+    # More allies = braver
+    bravery += min(0.3, allies * 0.05)
+    # Traits affect bravery
+    traits = getattr(npc, 'traits', [])
+    if 'brave' in traits or 'courageous' in traits:
+        bravery += 0.2
+    if 'cowardly' in traits or 'timid' in traits:
+        bravery -= 0.3
+
+    if threat > 5.0:
+        # Godlike entity — everyone flees or surrenders
+        if bravery > 0.8 and is_combatant:
+            _trigger_surrender(npc)  # brave guards surrender rather than die
+        else:
+            _trigger_flee(npc, attacker.x, attacker.y, 20)
+    elif threat > 2.0:
+        # Very strong — civilians flee, guards call for backup then fight
+        if is_combatant:
+            _trigger_call_guards(npc, attacker, npc_grid)
+            if allies >= 3:
+                _trigger_attack(npc, attacker)  # enough allies to fight
+            else:
+                _trigger_flee(npc, attacker.x, attacker.y)
+        else:
+            _trigger_flee(npc, attacker.x, attacker.y)
+    elif threat > 1.0:
+        # Moderate threat — guards attack, civilians call for help then flee
+        if is_combatant:
+            _trigger_attack(npc, attacker)
+        else:
+            _trigger_call_guards(npc, attacker, npc_grid)
+            _trigger_flee(npc, attacker.x, attacker.y)
+    else:
+        # Weak threat — even civilians might fight, or at least stand ground
+        if is_combatant:
+            _trigger_attack(npc, attacker)
+        elif bravery > 0.6 and allies >= 2:
+            # Brave civilian with friends — rally and attack
+            _trigger_attack(npc, attacker)
+        else:
+            _trigger_call_guards(npc, attacker, npc_grid)
+
+
 class SimDailyMixin:
     """Daily life, death handling, and economy methods."""
 
     def _handle_npc_death(self, npc: NPC):
+        if not npc.alive and getattr(npc, '_death_handled', False):
+            return  # already processed
         npc.alive = False
-        cause = "starvation" if npc.needs["hunger"] <= 0 else "dehydration" if npc.needs["thirst"] <= 0 else "wounds"
+        npc._death_handled = True
+        # Ensure movement/action state is cleared
+        npc._on_death()
+        # Determine cause of death from context
+        age = getattr(npc, 'age', 30)
+        cause = getattr(npc, '_death_cause', None)
+        if cause is None:
+            if npc.needs.get("hunger", 50) <= 0:
+                cause = "starvation"
+            elif npc.needs.get("thirst", 50) <= 0:
+                cause = "dehydration"
+            elif getattr(npc, 'combat_target', None) is not None:
+                cause = "combat"
+            elif getattr(npc, 'current_action', '') == "fighting":
+                cause = "combat"
+            elif age > 70 and npc.needs.get("hunger", 50) > 0 and npc.needs.get("thirst", 50) > 0:
+                cause = "old_age"
+            else:
+                # Check body damage for wound cause
+                body = getattr(npc, 'body', None)
+                if body and getattr(body, 'is_dead', False):
+                    cause = "wounds"
+                else:
+                    cause = "wounds"
         self.dead_npcs.append({"name": npc.name, "profession": npc.profession, "cause": cause,
-                               "time": self.time_sys.time_string})
+                               "time": self.time_sys.time_string, "age": int(age)})
         self.event_log.append(f"{npc.name} the {npc.profession} has died from {cause}.")
 
         # Increment population death counter for nearest settlement
@@ -99,11 +267,31 @@ class SimDailyMixin:
         if hasattr(self, 'child_system'):
             self.child_system.trigger_family_grief(npc, self.world_mgr.npcs)
 
+        # Combat death: nearby NPCs respond based on threat assessment
+        if cause in ("combat", "wounds", "murder"):
+            # Try to identify the killer
+            killer = getattr(npc, 'combat_target', None) or getattr(npc, '_last_attacker', None)
+            for other in self.npc_grid.get_nearby(npc.x, npc.y, 15):
+                if other.alive and other is not npc:
+                    if killer:
+                        _respond_to_threat(other, killer, self.npc_grid)
+                    else:
+                        # Unknown killer — civilians flee, guards go alert
+                        prof = getattr(other, 'profession', '').lower()
+                        if prof in ('guard', 'soldier', 'captain', 'knight'):
+                            other.current_action = "guarding"
+                            other.state = "alert"
+                        else:
+                            _trigger_flee(other, npc.x, npc.y)
+
     def _handle_npc_death_from_disease(self, npc, disease_name: str):
         """Handle NPC death caused by disease (called via health system callback)."""
         if not hasattr(npc, 'alive'):
             return
         npc.alive = False
+        # Ensure movement/action state is cleared
+        if hasattr(npc, '_on_death'):
+            npc._on_death()
         cause = f"disease ({disease_name})"
         self.dead_npcs.append({"name": npc.name, "profession": getattr(npc, 'profession', '?'),
                                "cause": cause, "time": self.time_sys.time_string})
@@ -149,6 +337,26 @@ class SimDailyMixin:
                     # Notify mental health system of witnessed death
                     if hasattr(self, 'mental_health'):
                         self.mental_health.on_death_witnessed(other)
+                    # Flee from the death location (panic response)
+                    _trigger_flee(other, npc.x, npc.y)
+
+    def _remove_dead_npcs(self, npcs: List[NPC]):
+        """Remove NPC entities that have been dead for over 30 seconds."""
+        import time as _t
+        now = _t.time()
+        CORPSE_LINGER = 30.0  # seconds before removal
+        to_remove = []
+        for npc in npcs:
+            if not npc.alive:
+                death_t = getattr(npc, '_death_time', None)
+                if death_t is not None and (now - death_t) >= CORPSE_LINGER:
+                    # Ensure death was fully handled before removing
+                    if not getattr(npc, '_death_handled', False):
+                        self._handle_npc_death(npc)
+                    to_remove.append(npc)
+        for npc in to_remove:
+            if npc in self.world_mgr.npcs:
+                self.world_mgr.npcs.remove(npc)
 
     # ---- LLM DECISIONS ----
 

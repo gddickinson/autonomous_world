@@ -1,6 +1,7 @@
 """Dispatch — routes creature kinds to their template drawing functions."""
 
 import pygame
+from game.settings import SHOW_CREATURE_LABELS
 from game.ui.character_anim import get_anim, _sin
 from game.ui.creatures.configs import CREATURE_CONFIGS
 from game.ui.creatures.templates_beasts import (
@@ -92,11 +93,15 @@ def draw_creature_body(screen, creature, sx: int, sy: int, s: int):
             _draw_fallback(screen, sx, sy, cs, color, walk_sin, breath)
 
     # Kind initial letter overlay
-    if cs >= 4:
+    if SHOW_CREATURE_LABELS and cs >= 4:
         if not hasattr(draw_creature_body, '_font'):
             draw_creature_body._font = pygame.font.SysFont("monospace", 9, bold=True)
-        letter = draw_creature_body._font.render(
-            kind[0].upper() if kind else "?", True, (255, 255, 255))
+            draw_creature_body._letter_cache = {}
+        ch = kind[0].upper() if kind else "?"
+        letter = draw_creature_body._letter_cache.get(ch)
+        if letter is None:
+            letter = draw_creature_body._font.render(ch, True, (255, 255, 255))
+            draw_creature_body._letter_cache[ch] = letter
         screen.blit(letter, (sx - letter.get_width() // 2,
                              sy - letter.get_height() // 2))
 

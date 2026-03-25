@@ -8,6 +8,60 @@ from game.core.player import Player
 from game.core.creature import Creature
 from game.core.npc import NPC
 
+# ---------------------------------------------------------------------------
+# Global combat visual event queue — drained by the game loop each frame.
+# Each entry: {"type": "damage"|"death", "target": entity, "damage": int, ...}
+# ---------------------------------------------------------------------------
+_pending_combat_visuals: List[Dict[str, Any]] = []
+
+# Global projectile manager — shared across all combat ticks
+from game.systems.projectiles import ProjectileManager
+_projectile_manager = ProjectileManager()
+
+
+def get_projectile_manager() -> 'ProjectileManager':
+    """Return the global projectile manager."""
+    return _projectile_manager
+
+
+def update_projectiles(dt: float) -> List[Dict[str, Any]]:
+    """Update all in-flight projectiles. Returns list of hit results.
+
+    Should be called once per frame from the main game loop.
+    """
+    results = _projectile_manager.update(dt)
+    return results
+
+
+def drain_combat_visuals() -> List[Dict[str, Any]]:
+    """Return and clear all pending combat visual events."""
+    global _pending_combat_visuals
+    events = _pending_combat_visuals
+    _pending_combat_visuals = []
+    return events
+
+
+def _emit_damage(target, damage: int, is_kill: bool = False):
+    """Queue a combat visual event for damage dealt."""
+    _pending_combat_visuals.append({
+        "type": "damage",
+        "target": target,
+        "damage": damage,
+        "is_kill": is_kill,
+        "x": getattr(target, 'x', 0),
+        "y": getattr(target, 'y', 0),
+    })
+
+
+def _emit_death(target):
+    """Queue a death visual event."""
+    _pending_combat_visuals.append({
+        "type": "death",
+        "target": target,
+        "x": getattr(target, 'x', 0),
+        "y": getattr(target, 'y', 0),
+    })
+
 
 # ---------------------------------------------------------------------------
 # Creature attack styles — maps creature kind to combat behaviour profile
@@ -160,6 +214,24 @@ class CombatSystem:
         if best_target is None:
             return None
 
+        # --- SURRENDER CHECK: don't attack surrendered entities ---
+        from game.systems.combat_depth import is_surrendered
+        if is_surrendered(best_target):
+            name = getattr(best_target, 'name', getattr(best_target, 'kind', 'target'))
+            return f"{name} has surrendered! Spare or finish them."
+
+        # --- SHIELD BLOCK CHECK ---
+        from game.systems.combat_depth import try_shield_block
+        if try_shield_block(best_target):
+            name = getattr(best_target, 'name', getattr(best_target, 'kind', 'target'))
+            return f"{name} BLOCKED your attack!"
+
+        # --- DODGE CHECK (light armor / no armor targets) ---
+        from game.systems.combat_depth import try_dodge
+        if try_dodge(best_target):
+            name = getattr(best_target, 'name', getattr(best_target, 'kind', 'target'))
+            return f"{name} DODGED your attack!"
+
         damage = player.get_attack_damage()
 
         # Apply magic modifiers (enchantments, buffs, shield absorption)
@@ -190,27 +262,38 @@ class CombatSystem:
             if target_kind == "npc":
                 defense = getattr(best_target, 'npc_defense', 0)
             actual = max(1, damage - defense)
+            best_target._last_attacker = player  # track who hit them
             best_target.take_damage(actual)
 
+        # Emit combat visual event
+        _emit_damage(best_target, actual,
+                     is_kill=not getattr(best_target, 'alive', True))
+
+        from game.systems.difficulty import scale_xp
         if target_kind == "creature":
             name = best_target.kind
             result = f"Hit {name} for {actual} damage!"
             if not best_target.alive:
-                player.gain_xp(best_target.xp_value)
+                xp_reward = scale_xp(best_target.xp_value)
+                player.gain_xp(xp_reward)
                 player.kills += 1
-                result += f" +{best_target.xp_value} XP"
+                result += f" +{xp_reward} XP"
         else:
             name = best_target.name
             cls = getattr(best_target, 'char_class', best_target.profession)
             result = f"Hit {name} ({cls}) for {actual} damage!"
             if not best_target.alive:
-                xp = getattr(best_target, 'level', 1) * 15
+                xp = scale_xp(getattr(best_target, 'level', 1) * 15)
                 player.gain_xp(xp)
                 player.kills += 1
                 result += f" Killed! +{xp} XP"
             else:
-                # NPC fights back or flees
-                if best_target.bravery > 0.4:
+                # --- SURRENDER CHECK: NPC may surrender below 20% HP ---
+                from game.systems.combat_depth import check_surrender
+                if check_surrender(best_target, player):
+                    result += f" {name} surrenders!"
+                elif best_target.bravery > 0.4:
+                    # NPC fights back
                     best_target.combat_target = player
                     best_target.current_action = "fighting"
                     best_target.state = "fighting"
@@ -261,13 +344,19 @@ class CombatSystem:
         if spell is None:
             return f"Unknown spell: {spell_name}"
 
-        # Gather all nearby entities
+        # Scale range and AoE by caster level
+        caster_level = getattr(player, 'level', 1)
+        eff_range = spell.range_tiles + (caster_level // 3)
+        eff_aoe = spell.area * (1.0 + 0.05 * caster_level) if spell.area > 0 else 0
+
+        # Gather all nearby entities within scaled range + AoE
         all_entities = []
+        gather_dist = eff_range + eff_aoe + 5  # extra margin
         for c in creatures:
-            if c.alive and player.dist_to(c) <= spell.range_tiles + spell.area:
+            if c.alive and player.dist_to(c) <= gather_dist:
                 all_entities.append(c)
         for n in npcs:
-            if n.alive and player.dist_to(n) <= spell.range_tiles + spell.area:
+            if n.alive and player.dist_to(n) <= gather_dist:
                 all_entities.append(n)
 
         # Find best target based on spell type
@@ -276,10 +365,10 @@ class CombatSystem:
 
         if spell.targets == "single" or spell.targets == "chain":
             # Find nearest hostile in facing direction
-            best_dist = spell.range_tiles
+            best_dist = eff_range
             for ent in all_entities:
                 dist = player.dist_to(ent)
-                if dist > spell.range_tiles:
+                if dist > eff_range:
                     continue
                 dx = ent.x - player.x
                 dy = ent.y - player.y
@@ -298,7 +387,7 @@ class CombatSystem:
                 # For resurrect, find dead NPCs
                 if spell_name == "resurrect":
                     for n in npcs:
-                        if not n.alive and player.dist_to(n) <= spell.range_tiles:
+                        if not n.alive and player.dist_to(n) <= eff_range:
                             target = n
                             break
                 else:
@@ -308,7 +397,7 @@ class CombatSystem:
                     for n in npcs:
                         if not n.alive:
                             continue
-                        if n.hp < n.max_hp * 0.5 and player.dist_to(n) <= spell.range_tiles:
+                        if n.hp < n.max_hp * 0.5 and player.dist_to(n) <= eff_range:
                             if getattr(n, 'player_relationship', 0) >= 0:
                                 target = n
                                 break
@@ -317,8 +406,8 @@ class CombatSystem:
             if not target_pos:
                 # Default: cast in facing direction at range
                 target_pos = (
-                    player.x + fx * min(spell.range_tiles, 4),
-                    player.y + fy * min(spell.range_tiles, 4),
+                    player.x + fx * min(eff_range, 4),
+                    player.y + fy * min(eff_range, 4),
                 )
 
         elif spell.targets == "self":
@@ -345,10 +434,24 @@ class CombatSystem:
         if not npc.alive or npc.state != "fighting":
             return None
 
+        # --- SURRENDER CHECK: this NPC may surrender ---
+        from game.systems.combat_depth import check_surrender, is_surrendered
+        if npc.state == "surrendered" or is_surrendered(npc):
+            return None
+        if check_surrender(npc):
+            return f"{npc.name} surrenders!"
+
         target = npc.combat_target
         if target is None or not getattr(target, 'alive', True):
             npc.state = "idle"
             npc.combat_target = None
+            npc.current_action = ""
+            return None
+
+        # Don't attack surrendered targets
+        if is_surrendered(target):
+            npc.combat_target = None
+            npc.state = "idle"
             npc.current_action = ""
             return None
 
@@ -529,11 +632,44 @@ class CombatSystem:
         if roll >= 20:
             damage = int(damage * 2.0)  # critical hit
 
+        # --- RANGED PROJECTILE: spawn projectile instead of instant hit ---
+        if is_ranged and dist > 3.0:
+            weapon_type = "bow"
+            if 'crossbow' in weapon_name:
+                weapon_type = "crossbow"
+            elif 'sling' in weapon_name:
+                weapon_type = "sling"
+            elif 'javelin' in weapon_name:
+                weapon_type = "javelin"
+            _projectile_manager.spawn(
+                npc.x, npc.y, target, damage,
+                damage_type=dmg_type, shooter=npc,
+                weapon_type=weapon_type,
+            )
+            degrade_weapon(npc)
+            return f"{npc.name} fires {weapon_type} at {getattr(target, 'name', getattr(target, 'kind', 'target'))}!"
+
+        # --- SHIELD BLOCK CHECK on target ---
+        from game.systems.combat_depth import try_shield_block
+        if try_shield_block(target):
+            target_name = getattr(target, 'name', getattr(target, 'kind', 'target'))
+            return f"{target_name} BLOCKED {npc.name}'s attack!"
+
+        # --- DODGE CHECK on target (light armor / no armor) ---
+        from game.systems.combat_depth import try_dodge
+        if try_dodge(target):
+            target_name = getattr(target, 'name', getattr(target, 'kind', 'target'))
+            return f"{target_name} DODGED {npc.name}'s attack!"
+
         # Apply through body damage system (body parts, armor, wounds, durability)
         actual = _bds.apply_damage(target, damage, damage_type=dmg_type)
 
         # Degrade attacker's weapon
         degrade_weapon(npc)
+
+        # Emit combat visual event
+        _emit_damage(target, actual,
+                     is_kill=not getattr(target, 'alive', True))
 
         npc_name = npc.name
         target_name = getattr(target, 'name', getattr(target, 'kind', 'target'))
@@ -543,6 +679,13 @@ class CombatSystem:
             npc.combat_target = None
             npc.current_action = ""
             return f"{npc_name} slew {target_name}!"
+
+        # --- SURRENDER CHECK on target after damage ---
+        if check_surrender(target, npc):
+            npc.state = "idle"
+            npc.combat_target = None
+            npc.current_action = ""
+            return f"{npc_name} hits {target_name} for {actual} {dmg_type} — {target_name} surrenders!"
 
         return f"{npc_name} hits {target_name} for {actual} {dmg_type} damage"
 
@@ -658,6 +801,10 @@ class CombatSystem:
 
         damage = getattr(creature, 'damage', 5)
 
+        # Difficulty scaling on enemy damage
+        from game.systems.difficulty import scale_enemy_damage
+        damage = scale_enemy_damage(damage)
+
         # Combat modifier (wounded creatures attack weaker)
         combat_mod = _bds.get_combat_modifier(creature)
         damage = max(1, int(damage * combat_mod))
@@ -712,6 +859,32 @@ class CombatSystem:
 
         if roll >= 20:
             damage *= 2  # critical
+
+        # --- RANGED CREATURE PROJECTILE: spawn projectile for ranged attacks ---
+        if is_ranged and dist > 3.0:
+            ranged_type = getattr(creature, '_ranged_type', '') or style_info.get("ranged_type", "bow")
+            _projectile_manager.spawn(
+                creature.x, creature.y, target, damage,
+                damage_type=dmg_type, shooter=creature,
+                weapon_type=ranged_type,
+            )
+            creature_name = getattr(creature, 'kind', 'creature')
+            target_name = getattr(target, 'name', getattr(target, 'kind', 'target'))
+            return f"{creature_name} fires {ranged_type} at {target_name}!"
+
+        # --- SHIELD BLOCK CHECK on target ---
+        from game.systems.combat_depth import try_shield_block
+        if try_shield_block(target):
+            target_name = getattr(target, 'name', getattr(target, 'kind', 'target'))
+            creature_name = getattr(creature, 'kind', 'creature')
+            return f"{target_name} BLOCKED {creature_name}'s attack!"
+
+        # --- DODGE CHECK on target (light armor / no armor) ---
+        from game.systems.combat_depth import try_dodge
+        if try_dodge(target):
+            target_name = getattr(target, 'name', getattr(target, 'kind', 'target'))
+            creature_name = getattr(creature, 'kind', 'creature')
+            return f"{target_name} DODGED {creature_name}'s attack!"
 
         # --- LIVING SIEGE ENGINE: AoE for large ranged monsters ---
         # Large creatures with ranged attacks deal area damage like siege engines:
@@ -768,6 +941,10 @@ class CombatSystem:
         # Track fire damage for regeneration suppression
         if dmg_type == "fire":
             target._last_fire_damage_tick = getattr(target, '_tick_count', 0)
+
+        # Emit combat visual event
+        _emit_damage(target, actual,
+                     is_kill=not getattr(target, 'alive', True))
 
         creature_name = getattr(creature, 'kind', 'creature')
         target_name = getattr(target, 'name', getattr(target, 'kind', 'target'))

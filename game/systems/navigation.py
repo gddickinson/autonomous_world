@@ -281,7 +281,7 @@ def wall_slide(entity, target_x: float, target_y: float,
 # Global path cache and budget tracking
 _path_cache = PathCache()
 _pathfind_calls_this_tick = 0
-_MAX_PATHFINDS_PER_TICK = 5
+_MAX_PATHFINDS_PER_TICK = 12
 
 
 def reset_pathfind_budget():

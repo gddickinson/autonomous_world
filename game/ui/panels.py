@@ -155,6 +155,12 @@ class UI:
         gold_text = self.font_md.render(f"Gold: {player.gold}", True, YELLOW)
         self.screen.blit(gold_text, (215, SCREEN_HEIGHT - 30))
 
+        # Active title under player info
+        tracker = getattr(player, 'title_tracker', None)
+        if tracker and tracker.active_title:
+            title_surf = self.font_sm.render(tracker.active_title, True, (200, 180, 100))
+            self.screen.blit(title_surf, (10, SCREEN_HEIGHT - 64))
+
         # Time display (with season and moon info)
         time_text = self.font_md.render(time_sys.time_string, True, UI_TEXT)
         self.screen.blit(time_text, (SCREEN_WIDTH // 2 - time_text.get_width() // 2, 10))
@@ -1236,6 +1242,22 @@ class UI:
             y += 6
             records = f"Kills: {player.kills}  |  Quests: {player.quests_completed}  |  Distance: {int(player.steps)} tiles"
             self.screen.blit(self.font_sm.render(records, True, GRAY), (cx + 15, y))
+            y += 18
+            # Titles section
+            tracker = getattr(player, 'title_tracker', None)
+            if tracker:
+                active = tracker.active_title
+                if active:
+                    self.screen.blit(self.font_sm.render(
+                        f"Active Title: {active}", True, (220, 200, 100)), (cx + 15, y))
+                    y += 16
+                all_titles = tracker.get_all_titles()
+                if all_titles:
+                    titles_str = ", ".join(all_titles[:5])
+                    if len(all_titles) > 5:
+                        titles_str += f" (+{len(all_titles) - 5} more)"
+                    self.screen.blit(self.font_sm.render(
+                        f"Titles: {titles_str}", True, (180, 180, 200)), (cx + 15, y))
 
         hint = self.font_sm.render("[Escape/C] Close", True, (150, 150, 170))
         self.screen.blit(hint, (cx + cw // 2 - hint.get_width() // 2, cy + ch - 22))

@@ -67,6 +67,7 @@ class DefensePlan:
     # gate: (x, y, direction)
     wall_radius: int = 0
     has_moat: bool = False
+    moat_points: List[Tuple[int, int]] = field(default_factory=list)
 
 
 @dataclass
@@ -527,7 +528,8 @@ class SettlementPlanner:
 
     def plan_settlement(self, name: str, kind: str, cx: int, cy: int,
                         radius: int, world_plan, rng: random.Random,
-                        specialization: str = "general"
+                        specialization: str = "general",
+                        race: str = "human"
                         ) -> SettlementLayout:
         """Create a detailed settlement layout plan.
 
@@ -544,6 +546,17 @@ class SettlementPlanner:
             SettlementLayout with positioned buildings, roads, walls, farms
         """
         self._specialization = specialization
+
+        # Use Voronoi layout if enabled (pre-generated during loading)
+        from game.settings import USE_VORONOI_LAYOUT
+        if USE_VORONOI_LAYOUT:
+            from game.world.voronoi_layout import VoronoiSettlementLayout
+            vlayout = VoronoiSettlementLayout(
+                name, kind, cx, cy, radius, world_plan, rng,
+                specialization=specialization, race=race)
+            return vlayout.generate()
+
+        # --- Legacy zone-based layout below ---
 
         # 1. Analyze terrain around center
         terrain = self._analyze_terrain(cx, cy, radius, world_plan)

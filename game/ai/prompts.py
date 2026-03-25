@@ -681,14 +681,36 @@ def mock_npc_decision(needs: dict, has_food: bool, has_drink: bool,
                       "TALK_TO | nearby | teaching skills"],
     }
 
-    actions = class_actions.get(cls, ["MOVE_TO | nearby | wandering", "IDLE | here | resting"])
+    actions = class_actions.get(cls, ["MOVE_TO | nearby | wandering"])
+    # Also add profession-specific fallback if class has no entry
+    prof_actions = {
+        "Woodcutter": ["CHOP_TREE | forest | felling trees", "GATHER_FIREWOOD | forest | collecting wood"],
+        "Blacksmith": ["CRAFT | forge | working the forge", "MINE_ROCK | nearby | getting ore"],
+        "Carpenter":  ["BUILD | floor | building structures", "CHOP_TREE | forest | sourcing lumber"],
+        "Baker":      ["CRAFT | bakery | baking bread", "FARM | harvest | checking grain"],
+        "Tanner":     ["TAN_HIDE | tannery | processing hides"],
+        "Weaver":     ["DYE_CLOTH | dye house | dyeing cloth", "CRAFT | loom | weaving"],
+        "Potter":     ["CRAFT_POTTERY | studio | shaping clay"],
+        "Brewer":     ["CRAFT | brewery | brewing ale"],
+        "Hunter":     ["TRACK | wilderness | tracking game", "FIGHT | deer | hunting"],
+        "Shepherd":   ["TRAIN_ANIMAL | pasture | herding livestock"],
+        "Herbalist":  ["FORAGE | herbs | gathering plants"],
+        "Mason":      ["BUILD | wall | laying stone", "MINE_ROCK | nearby | quarrying"],
+        "Cook":       ["CRAFT | kitchen | preparing meals"],
+        "Laborer":    ["BUILD | floor | construction", "GATHER_FIREWOOD | forest | hauling"],
+        "Builder":    ["BUILD | wall | constructing", "BUILD | floor | foundations"],
+        "Soldier":    ["TRAIN_COMBAT | ground | drilling", "PATROL | perimeter | patrol"],
+        "Servant":    ["FETCH_WATER | well | drawing water", "MOVE_TO | kitchen | cleaning"],
+    }
+    if cls not in class_actions and profession in prof_actions:
+        actions = prof_actions[profession]
 
-    # 65% chance: do class/skill work (the main thing NPCs spend their day doing)
-    if random.random() < 0.65:
+    # 80% chance: do class/skill work (the main thing NPCs spend their day doing)
+    if random.random() < 0.80:
         return random.choice(actions)
 
     # Approach player sometimes (only when nearby and not too often)
-    if random.random() < 0.06:
+    if random.random() < 0.15:
         if is_evil:
             return "APPROACH_PLAYER | player | sizing up this newcomer"
         elif is_good:

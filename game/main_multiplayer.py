@@ -1,4 +1,7 @@
-"""Multiplayer networking — TCP server/client, AI player."""
+"""Multiplayer networking — TCP server/client, AI player.
+
+Includes co-op quest sync, PvP arena, and player-to-player trade.
+"""
 
 from game.settings import *
 
@@ -8,6 +11,11 @@ class MultiplayerMixin:
 
     def _init_multiplayer(self):
         """Initialize multiplayer networking based on config."""
+        # Multiplayer gameplay state (always init so attrs exist)
+        self._trade_manager = None
+        self._pvp_session = None
+        self._pending_trade_request = False
+
         if not self.config.get("multiplayer_enabled", False):
             return
 
@@ -23,6 +31,9 @@ class MultiplayerMixin:
                 self.notifications.add(
                     f"Multiplayer server started on port {port}",
                     5.0, (100, 220, 100))
+                # Init trade manager (host-only)
+                from game.network.player_trade import TradeManager
+                self._trade_manager = TradeManager()
                 # Spawn AI player if enabled
                 if self.config.get("ai_player_enabled", False):
                     self._spawn_ai_player()
@@ -113,6 +124,13 @@ class MultiplayerMixin:
                 if pid not in seen:
                     del self.remote_players[pid]
 
+            # Tick PvP session
+            self._mp_update_pvp(dt)
+
+            # Cleanup expired trades
+            if self._trade_manager:
+                self._trade_manager.cleanup_expired()
+
         elif self.net_client:
             # Remote client: send our position, process incoming
             self.net_client.send_move(
@@ -175,10 +193,109 @@ class MultiplayerMixin:
             color = tuple(data.get("color", [220, 220, 230]))
             self.notifications.add(text, duration, color)
 
+        elif msg_type == MessageType.PLAYER_ATTACK:
+            # PvP: if the attack targets a player, route to PvP session
+            target_type = data.get("target_type", "")
+            if target_type == "player" and self._pvp_session:
+                damage = data.get("damage", 0)
+                if self._pvp_session.active and damage > 0:
+                    self._pvp_session.apply_attack_to_local(
+                        damage, self.net_server)
+
         elif msg_type == MessageType.GAME_EVENT:
-            desc = data.get("description", "")
-            if desc:
-                self.notifications.add(desc, 4.0, (200, 200, 100))
+            event_type = data.get("event_type", "")
+            # Route to specialized handlers by event prefix
+            if event_type.startswith("quest_"):
+                from game.network.coop_quests import handle_quest_event
+                handle_quest_event(self, data)
+            elif event_type.startswith("pvp_"):
+                from game.network.pvp_arena import handle_pvp_event
+                handle_pvp_event(self, data)
+            elif event_type.startswith("trade_"):
+                from game.network.player_trade import handle_trade_event
+                handle_trade_event(self, data)
+            else:
+                desc = data.get("description", "")
+                if desc:
+                    self.notifications.add(desc, 4.0, (200, 200, 100))
+
+    # ── Co-op quest helpers ───────────────────────────────────────
+
+    def _mp_broadcast_quest_accept(self, quest):
+        """Broadcast quest acceptance to all connected players."""
+        if not self.net_server:
+            return
+        from game.network.coop_quests import broadcast_quest_accept
+        broadcast_quest_accept(self.net_server, quest)
+
+    def _mp_broadcast_quest_kill(self, quest, killer_name: str = ""):
+        """Broadcast quest progress after a kill."""
+        if not self.net_server:
+            return
+        from game.network.coop_quests import broadcast_quest_progress
+        broadcast_quest_progress(self.net_server, quest, killer_name)
+
+    def _mp_broadcast_quest_complete(self, quest):
+        """Broadcast quest completion to all connected players."""
+        if not self.net_server:
+            return
+        from game.network.coop_quests import broadcast_quest_complete
+        broadcast_quest_complete(self.net_server, quest)
+
+    # ── PvP arena helpers ─────────────────────────────────────────
+
+    def _mp_start_pvp(self, remote_player_id: str):
+        """Start a PvP arena match against a remote player (host only)."""
+        if not self.net_server:
+            return
+        from game.network.pvp_arena import PvPArenaSession
+        self._pvp_session = PvPArenaSession(self.player, remote_player_id)
+        msg = self._pvp_session.start(self.net_server)
+        self.notifications.add(msg, 5.0, (255, 200, 100))
+
+    def _mp_pvp_attack(self, damage: int):
+        """Host attacks the remote player in PvP."""
+        if self._pvp_session and self._pvp_session.active and self.net_server:
+            self._pvp_session.apply_attack_to_remote(damage, self.net_server)
+
+    def _mp_update_pvp(self, dt: float):
+        """Tick the PvP session. Called from _update_multiplayer."""
+        if self._pvp_session and self._pvp_session.active and self.net_server:
+            result = self._pvp_session.update(dt, self.net_server)
+            if result:
+                self.notifications.add(result, 6.0, (255, 220, 100))
+
+    # ── Trade helpers ─────────────────────────────────────────────
+
+    def _mp_request_trade(self, remote_player_id: str):
+        """Host initiates a trade with a remote player."""
+        if not self._trade_manager or not self.net_server:
+            return
+        self._trade_manager.request_trade(
+            "host", remote_player_id, self.net_server, self.player.name)
+        self.notifications.add(
+            "Trade request sent!", 3.0, (255, 220, 100))
+
+    def _mp_offer_trade_items(self, items: list):
+        """Host updates their trade offer. items = [(name, count), ...]"""
+        if not self._trade_manager or not self.net_server:
+            return
+        self._trade_manager.set_offer("host", items, self.net_server)
+
+    def _mp_confirm_trade(self):
+        """Host confirms the trade."""
+        if not self._trade_manager or not self.net_server:
+            return
+        result = self._trade_manager.confirm_trade(
+            "host", self.net_server, self)
+        if result:
+            self.notifications.add(result, 5.0, (100, 255, 100))
+
+    def _mp_cancel_trade(self):
+        """Host cancels the active trade."""
+        if not self._trade_manager or not self.net_server:
+            return
+        self._trade_manager.cancel_trade("host", self.net_server)
 
     def _draw_remote_players(self):
         """Draw all remote players on the overworld."""

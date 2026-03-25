@@ -252,6 +252,7 @@ class MilitarySystem:
 
     def update(self, dt: float, npcs: list, governance, world):
         """Update military movements, campaigns, and check for battles."""
+        self._world = world  # stash for terrain damage in battles
         self.update_timer += dt
         if self.update_timer < 30.0:
             return
@@ -570,6 +571,33 @@ class MilitarySystem:
             f"Battle resolved in {rounds} rounds: {winner_kingdom or '?'} wins "
             f"(casualties: {w_casualties} vs {l_casualties})")
 
+        # --- Terrain damage from battle ---
+        _world = getattr(self, '_world', None)
+        if _world:
+            from game.systems.conflict_damage import (
+                damage_farmland, damage_buildings, scorch_terrain,
+                BATTLE_FARM_DAMAGE, BATTLE_BUILDING_DESTROY_CHANCE,
+                _find_nearest_settlement_name,
+            )
+            # Use the position of the first army that engaged
+            bx = side1[0].x if side1 else 0
+            by = side1[0].y if side1 else 0
+            farm_dmg = damage_farmland(_world, bx, by,
+                                       count_range=BATTLE_FARM_DAMAGE)
+            bldg_dmg = damage_buildings(_world, bx, by,
+                                        destroy_chance=BATTLE_BUILDING_DESTROY_CHANCE)
+            scorch = scorch_terrain(_world, bx, by, count=3)
+            loc = _find_nearest_settlement_name(_world, bx, by) or f"({int(bx)},{int(by)})"
+            if farm_dmg > 0:
+                self.battles_log.append(
+                    f"Battle devastated {farm_dmg} farmland tiles near {loc}")
+            if bldg_dmg:
+                self.battles_log.append(
+                    f"Buildings damaged in battle near {loc}!")
+            if scorch > 0:
+                self.battles_log.append(
+                    f"Battle fires scorched {scorch} forest tiles near {loc}")
+
     def _distribute_army_casualties(self, armies: List[Army], total_casualties: int,
                                      npcs: list, death_rate: float = 0.3):
         """Distribute casualties across multiple armies proportionally."""
@@ -588,6 +616,7 @@ class MilitarySystem:
                 if npc and npc.alive:
                     npc.hp = max(1, npc.hp - random.randint(10, 30))
                     if random.random() < death_rate:
+                        npc._death_cause = "combat"
                         npc.alive = False
                         npc.hp = 0
                     army.remove_soldier(soldier_name)
@@ -646,6 +675,7 @@ class MilitarySystem:
             if npc.name in loser.soldiers and npc.alive:
                 npc.hp = max(1, npc.hp - random.randint(10, 30))
                 if random.random() < 0.3:  # 30% chance of death per casualty
+                    npc._death_cause = "combat"
                     npc.alive = False
                     npc.hp = 0
                 loser.remove_soldier(npc.name)

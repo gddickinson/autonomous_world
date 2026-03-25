@@ -24,6 +24,12 @@ class RendererBuildingsMixin:
             "blacksmith": (70, 70, 75),  # dark gray
             "market":   (170, 110, 60),  # vibrant warm
             "house":    (130, 100, 65),  # earth tones
+            "tree_house": (80, 130, 60),  # green canopy
+            "stone_house": (140, 140, 150), # gray stone
+            "hut":      (150, 120, 70),  # rough thatch
+            "burrow":   (110, 100, 60),  # earthy
+            "mead_hall": (160, 110, 60), # warm oak
+            "war_shrine": (120, 50, 50), # dark red
             "default":  (90, 80, 70),    # fallback gray
         }
         for kind, base in roof_styles.items():
@@ -84,6 +90,18 @@ class RendererBuildingsMixin:
                 kind = "blacksmith"
             elif "market" in func_lower or "shop" in func_lower or "store" in func_lower:
                 kind = "market"
+            elif "tree_house" in func_lower or "tree_platform" in func_lower:
+                kind = "tree_house"
+            elif "stone_house" in func_lower or "stone_cottage" in func_lower:
+                kind = "stone_house"
+            elif func_lower in ("hut", "chieftain_hut"):
+                kind = "hut"
+            elif "burrow" in func_lower:
+                kind = "burrow"
+            elif "mead_hall" in func_lower:
+                kind = "mead_hall"
+            elif "war_shrine" in func_lower or "idol_pit" in func_lower:
+                kind = "war_shrine"
             elif "house" in func_lower or "cottage" in func_lower or "hovel" in func_lower:
                 kind = "house"
         return self._roof_cache.get(kind, self._roof_cache.get("default"))
@@ -116,31 +134,34 @@ class RendererBuildingsMixin:
         if not hasattr(self, '_tile_structure_map'):
             self._get_roof_for_tile(0, 0, world)  # builds the map
 
-        # Collect all building tile positions with their height
-        height_map = {}  # (x, y) -> num_floors
-        if hasattr(world, 'plan'):
-            for sp in world.plan.settlements:
-                for bld in sp.buildings:
-                    bx, by = bld['x'], bld['y']
-                    bw, bh = bld['w'], bld['h']
-                    bname = bld.get('name', '')
-                    if 'Tower' in bname or 'Keep' in bname or 'Castle' in bname:
-                        nf = 3
-                    elif sp.kind in ('city', 'castle'):
-                        nf = 2
-                    else:
-                        nf = 1
-                    for dy in range(bh):
-                        for dx in range(bw):
-                            height_map[(bx + dx, by + dy)] = nf
-            # Temples
-            for loc in world.plan.special_locations:
-                if loc.kind == 'temple':
-                    r = loc.radius
-                    for dy in range(-r, r + 1):
-                        for dx in range(-r, r + 1):
-                            if dx * dx + dy * dy <= r * r:
-                                height_map[(loc.x + dx, loc.y + dy)] = 1
+        # Cached height map (built once, reused every frame)
+        if not hasattr(self, '_height_map_cache') or self._height_map_cache is None:
+            self._height_map_cache = {}
+            if hasattr(world, 'plan'):
+                for sp in world.plan.settlements:
+                    for bld in sp.buildings:
+                        bx, by = bld['x'], bld['y']
+                        bw, bh = bld['w'], bld['h']
+                        bname = bld.get('name', '')
+                        if 'Tower' in bname or 'Keep' in bname or 'Castle' in bname:
+                            nf = 3
+                        elif sp.kind in ('city', 'castle'):
+                            nf = 2
+                        else:
+                            nf = 1
+                        for dy in range(bh):
+                            for dx in range(bw):
+                                self._height_map_cache[(bx + dx, by + dy)] = nf
+                # Temples
+                for loc in world.plan.special_locations:
+                    if loc.kind == 'temple':
+                        r = loc.radius
+                        for dy in range(-r, r + 1):
+                            for dx in range(-r, r + 1):
+                                if dx * dx + dy * dy <= r * r:
+                                    self._height_map_cache[(loc.x + dx, loc.y + dy)] = 1
+
+        height_map = self._height_map_cache
 
         wall_types = (WALL,)
         interior_types = (FLOOR, TABLE, BED, CHEST, STAIRS_UP, STAIRS_DOWN,

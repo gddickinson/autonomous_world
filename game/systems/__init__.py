@@ -94,25 +94,36 @@ class TimeSystem:
 
     @property
     def darkness(self) -> float:
-        """0.0 = full daylight, 1.0 = full darkness. Uses astronomical sunrise/sunset."""
-        t = self.normalized
-        dawn = self._astro["dawn_start"]
-        day_s = self._astro["day_start"]
-        dusk = self._astro["dusk_start"]
-        night = self._astro["night_start"]
+        """0.0 = full daylight, 1.0 = full darkness.
 
-        if day_s <= t < dusk:
+        Aligned with draw_lighting() renderer schedule for consistency:
+          Hour 5-7   (dawn):  ramp 1.0 -> 0.0
+          Hour 7-17  (day):   0.0
+          Hour 17-21 (dusk/evening): ramp 0.0 -> 1.0
+          Hour 21-5  (night): 1.0
+        """
+        t = self.normalized  # 0.0-1.0 fraction of day
+
+        # Transition windows aligned with draw_lighting() in renderer
+        dawn_start = 5.0 / 24.0   # 0.2083
+        dawn_end   = 7.0 / 24.0   # 0.2917
+        dusk_start = 17.0 / 24.0  # 0.7083
+        dusk_end   = 21.0 / 24.0  # 0.875
+
+        if dawn_end <= t < dusk_start:
+            # Full daylight
             return 0.0
-        elif dusk <= t < night:
-            span = night - dusk
-            return (t - dusk) / span if span > 0 else 1.0
-        elif t >= night:
+        elif dusk_start <= t < dusk_end:
+            # Dusk through evening: ramp 0.0 -> 1.0
+            span = dusk_end - dusk_start
+            return (t - dusk_start) / span
+        elif t >= dusk_end or t < dawn_start:
+            # Full night
             return 1.0
-        elif t < dawn:
-            return 1.0
-        else:  # dawn to day_start
-            span = day_s - dawn
-            return 1.0 - (t - dawn) / span if span > 0 else 0.0
+        else:
+            # Dawn: ramp 1.0 -> 0.0
+            span = dawn_end - dawn_start
+            return 1.0 - (t - dawn_start) / span
 
     @property
     def time_string(self) -> str:

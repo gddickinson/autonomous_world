@@ -15,10 +15,23 @@ from game.ui.character_anim import (
     get_anim, update_anim, draw_npc_body, draw_creature_body
 )
 from game.ui.mount_render import is_mounted, draw_mounted_entity
+from game.ui.combat_effects import CombatEffects
 from game.ui.object_sprites import (
     draw_battering_ram, draw_catapult, draw_trebuchet, draw_siege_tower,
     draw_handcart, draw_cart, draw_wagon, draw_supply_wagon,
 )
+from game.ui.water_render import (
+    classify_water_tile, build_water_tile_variants, build_wave_frames,
+    build_shore_foam_overlays, get_land_neighbor_mask,
+)
+from game.ui.renderer_tiles import build_tile_cache
+
+# Pre-computed frozenset for terrain edge blending checks (hot path)
+_NATURAL_BLEND_TYPES = frozenset((
+    GRASS, SAND, FOREST, DENSE_FOREST, SNOW,
+    SWAMP, WATER, MOUNTAIN, FARMLAND,
+    ROCKY_GROUND, MARSH,
+))
 
 
 class Renderer:
@@ -43,6 +56,10 @@ class Renderer:
         self._build_seasonal_color_cache()
         self._build_seasonal_tile_cache("summer")
 
+        # Vegetation and crop system references (set externally)
+        self._vegetation_sys = None  # VegetationSystem
+        self._crop_system = None     # CropSystem
+
         # Minimap surface
         self.minimap_surface: Optional[pygame.Surface] = None
         self.minimap_explored: Optional[pygame.Surface] = None
@@ -53,7 +70,13 @@ class Renderer:
         # Particle effects
         self.particles: List[dict] = []
 
-        # Action icon lookup (avoid rebuilding per-NPC per-frame)
+        self._dimmed_cache = {}
+        self._dim_overlay_cache = {}
+        self._consciousness_glow_cache = {}
+        self._name_surf_cache = {}
+        self._action_surf_cache = {}
+        self._wall_grad_cache = {}
+
         self._action_icons = {
             "sleeping": ("z z z", (150, 150, 200)),
             "talking": ("...", (200, 200, 100)),
@@ -107,6 +130,13 @@ class Renderer:
         self._ripple_frame: int = 0
         self._ripple_timer: float = 0.0
 
+        # Water depth variant tiles (shallow/normal/deep + animation frames)
+        self._water_base_variants = build_water_tile_variants(TILE_SIZE)
+        self._water_wave_frames = build_wave_frames(
+            self._water_base_variants, TILE_SIZE, num_frames=3)
+        self._water_anim_tick: int = 0
+        self._shore_foam = build_shore_foam_overlays(TILE_SIZE, num_frames=3)
+
         # Leaf particles in forests
         self._leaf_particles: List[dict] = []
         self._leaf_timer: float = 0.0
@@ -127,6 +157,9 @@ class Renderer:
         # Enemy health bars — track recently damaged/targeted creatures
         self._hp_bar_targets: Dict[int, float] = {}  # id(entity) -> timer
 
+        # Combat visual effects (damage popups, hit flashes, death, HP bars)
+        self.combat_fx = CombatEffects()
+
         # Spell visual effects
         self._spell_effects: List[dict] = []
 
@@ -138,711 +171,40 @@ class Renderer:
         self._thunder_shake: float = 0.0    # remaining shake duration
         self._fog_offset: float = 0.0       # wavy fog animation
 
+    def _get_dimmed_tile(self, tile_surf, alpha):
+        key = (id(tile_surf), alpha)
+        cached = self._dim_overlay_cache.get(key)
+        if cached is not None:
+            return cached
+        dimmed = tile_surf.copy()
+        dark = pygame.Surface((TILE_SIZE, TILE_SIZE), pygame.SRCALPHA)
+        dark.fill((0, 0, 0, alpha))
+        dimmed.blit(dark, (0, 0))
+        self._dim_overlay_cache[key] = dimmed
+        return dimmed
+
+    def _get_dim_overlay(self, alpha):
+        cached = self._dimmed_cache.get(('_overlay', alpha))
+        if cached is not None:
+            return cached
+        s = pygame.Surface((TILE_SIZE, TILE_SIZE), pygame.SRCALPHA)
+        s.fill((0, 0, 0, alpha))
+        self._dimmed_cache[('_overlay', alpha)] = s
+        return s
+
     def _build_tile_cache(self):
-        """Pre-render tile surfaces for each terrain type."""
-        for terrain_type, base_color in TERRAIN_COLORS.items():
-            surf = pygame.Surface((TILE_SIZE, TILE_SIZE))
+        """Pre-render tile surfaces for each terrain type.
 
-            # Base color with slight variation
-            r, g, b = base_color
-            surf.fill(base_color)
+        Delegates to renderer_tiles.build_tile_cache() — the actual tile
+        generation code lives in renderer_tiles.py to keep this file smaller.
+        """
+        self._tile_cache = build_tile_cache(TILE_SIZE)
 
-            # Add texture detail
-            if terrain_type == GRASS:
-                for _ in range(4):
-                    x = (hash((_ * 7 + terrain_type)) % (TILE_SIZE - 2)) + 1
-                    y = (hash((_ * 13 + terrain_type)) % (TILE_SIZE - 2)) + 1
-                    pygame.draw.line(surf, (r - 15, g + 10, b - 10), (x, y), (x, y + 2))
-            elif terrain_type == WATER:
-                # Deeper water with wave pattern and color variation
-                deep = (max(0, r - 15), max(0, g - 5), min(255, b + 10))
-                surf.fill(deep)
-                # Lighter wave crests
-                for i in range(3):
-                    y_pos = 5 + i * 5
-                    wave_color = (min(255, r + 25), min(255, g + 25), min(255, b + 25))
-                    for px in range(TILE_SIZE):
-                        offset = (px * 3 + i * 7) % 4
-                        if offset < 2:
-                            surf.set_at((px, y_pos), wave_color)
-                # Foam/sparkle highlights
-                for i in range(2):
-                    fx = (hash(i * 19 + 3) % (TILE_SIZE - 2)) + 1
-                    fy = (hash(i * 23 + 7) % (TILE_SIZE - 2)) + 1
-                    surf.set_at((fx, fy), (min(255, r + 45), min(255, g + 45), min(255, b + 40)))
-            elif terrain_type == FOREST:
-                # Tree with undergrowth detail
-                # Ground cover
-                for i in range(6):
-                    gx = (hash(i * 11 + 1) % (TILE_SIZE - 2)) + 1
-                    gy = (hash(i * 17 + 3) % (TILE_SIZE - 2)) + 1
-                    pygame.draw.circle(surf, (max(0, r - 8), min(255, g + 5), max(0, b - 3)),
-                                       (gx, gy), 1)
-                # Tree trunk
-                cx, cy = TILE_SIZE // 2, TILE_SIZE // 2
-                pygame.draw.rect(surf, (75, 50, 30), (cx - 2, cy + 2, 4, 7))
-                # Canopy with shadow
-                pygame.draw.circle(surf, (max(0, r - 15), g, max(0, b - 8)), (cx, cy - 2), 7)
-                pygame.draw.circle(surf, (max(0, r - 5), min(255, g + 15), max(0, b - 3)),
-                                   (cx - 1, cy - 3), 6)
-            elif terrain_type == DENSE_FOREST:
-                # Multiple trees with overlapping canopy
-                trees = [(5, 5, 5), (11, 4, 6), (8, 12, 5), (14, 11, 4)]
-                for ox, oy, tr in trees:
-                    if ox < TILE_SIZE and oy < TILE_SIZE:
-                        pygame.draw.rect(surf, (55, 35, 22), (ox, oy + tr, 2, 4))
-                        pygame.draw.circle(surf, (max(0, r - 8), min(255, g + 8), max(0, b - 5)),
-                                           (ox, oy), tr)
-                # Dark undergrowth
-                for i in range(4):
-                    ux = (hash(i * 7 + 5) % (TILE_SIZE - 2)) + 1
-                    uy = TILE_SIZE - 4 + (hash(i * 3) % 3)
-                    pygame.draw.line(surf, (max(0, r - 12), max(0, g - 5), max(0, b - 8)),
-                                    (ux, uy), (ux, uy - 2))
-            elif terrain_type == MOUNTAIN:
-                pts = [(TILE_SIZE // 2, 4), (4, TILE_SIZE - 4), (TILE_SIZE - 4, TILE_SIZE - 4)]
-                pygame.draw.polygon(surf, (r + 15, g + 15, b + 15), pts)
-                pygame.draw.polygon(surf, base_color, pts, 2)
-                # Snow cap
-                pygame.draw.polygon(surf, (220, 225, 230),
-                                    [(TILE_SIZE // 2, 4), (TILE_SIZE // 2 - 5, 12), (TILE_SIZE // 2 + 5, 12)])
-            elif terrain_type == WALL:
-                # 2.5D wall: top face lighter, front face darker for depth
-                top_color = (r + 25, g + 25, b + 25)
-                front_color = (r - 5, g - 5, b - 5)
-                shadow_color = (r - 25, g - 25, b - 25)
-                # Front face (lower 60%)
-                pygame.draw.rect(surf, front_color, (0, TILE_SIZE * 4 // 10, TILE_SIZE, TILE_SIZE * 6 // 10))
-                # Top face (upper 40%)
-                pygame.draw.rect(surf, top_color, (0, 0, TILE_SIZE, TILE_SIZE * 4 // 10))
-                # Edge line
-                pygame.draw.line(surf, shadow_color, (0, TILE_SIZE * 4 // 10), (TILE_SIZE, TILE_SIZE * 4 // 10))
-                # Mortar lines
-                pygame.draw.line(surf, shadow_color, (0, TILE_SIZE * 7 // 10), (TILE_SIZE, TILE_SIZE * 7 // 10))
-                pygame.draw.line(surf, shadow_color, (TILE_SIZE // 2, TILE_SIZE * 4 // 10), (TILE_SIZE // 2, TILE_SIZE * 7 // 10))
-            elif terrain_type == WINDOW:
-                # Window in a wall - 2.5D wall with glass pane
-                top_color = (90, 80, 70)
-                front_color = (75, 65, 55)
-                pygame.draw.rect(surf, front_color, (0, TILE_SIZE * 4 // 10, TILE_SIZE, TILE_SIZE * 6 // 10))
-                pygame.draw.rect(surf, top_color, (0, 0, TILE_SIZE, TILE_SIZE * 4 // 10))
-                pygame.draw.line(surf, (60, 50, 40), (0, TILE_SIZE * 4 // 10), (TILE_SIZE, TILE_SIZE * 4 // 10))
-                # Glass pane (lighter blue center)
-                glass_color = (140, 180, 220)
-                glass_frame = (80, 70, 60)
-                gx, gy = 6, TILE_SIZE * 4 // 10 + 3
-                gw, gh = TILE_SIZE - 12, TILE_SIZE * 5 // 10 - 4
-                pygame.draw.rect(surf, glass_frame, (gx - 1, gy - 1, gw + 2, gh + 2))
-                pygame.draw.rect(surf, glass_color, (gx, gy, gw, gh))
-                # Cross bar
-                pygame.draw.line(surf, glass_frame, (gx + gw // 2, gy), (gx + gw // 2, gy + gh))
-                pygame.draw.line(surf, glass_frame, (gx, gy + gh // 2), (gx + gw, gy + gh // 2))
-            elif terrain_type == LOCKED_DOOR:
-                # Locked door - similar to door but with lock indicator
-                surf.fill((160, 130, 95))  # floor base
-                pygame.draw.rect(surf, (100, 70, 40), (4, 0, TILE_SIZE - 8, TILE_SIZE))
-                pygame.draw.line(surf, (80, 55, 30), (TILE_SIZE // 2, 2), (TILE_SIZE // 2, TILE_SIZE - 2))
-                # Lock (red tinted)
-                pygame.draw.circle(surf, (180, 60, 40), (TILE_SIZE - 8, TILE_SIZE // 2), 4)
-                pygame.draw.circle(surf, (140, 40, 30), (TILE_SIZE - 8, TILE_SIZE // 2), 4, 1)
-            elif terrain_type == FLOOR:
-                # Indoor floor with wood plank pattern
-                for i in range(0, TILE_SIZE, 8):
-                    plank_shade = r + (i * 2) % 12 - 6
-                    pygame.draw.rect(surf, (plank_shade, g + (i % 8) - 4, b - 3),
-                                    (0, i, TILE_SIZE, 7))
-                    pygame.draw.line(surf, (r - 15, g - 15, b - 10), (0, i), (TILE_SIZE, i))
-            elif terrain_type == DOOR:
-                # Open door with floor visible
-                surf.fill((max(0,r-10), max(0,g-10), max(0,b-10)))  # slightly darker floor
-                # Door frame
-                pygame.draw.rect(surf, (110, 80, 50), (2, 0, 3, TILE_SIZE))
-                pygame.draw.rect(surf, (110, 80, 50), (TILE_SIZE - 5, 0, 3, TILE_SIZE))
-            elif terrain_type == ROAD:
-                for i in range(0, TILE_SIZE, 6):
-                    pygame.draw.circle(surf, (r - 10, g - 10, b - 10), (i + 3, TILE_SIZE // 2), 1)
-            elif terrain_type == BRIDGE:
-                pygame.draw.rect(surf, (r - 15, g - 15, b - 15), (0, 4, TILE_SIZE, TILE_SIZE - 8))
-                for i in range(0, TILE_SIZE, 8):
-                    pygame.draw.line(surf, (r + 10, g + 10, b + 10), (i, 4), (i, TILE_SIZE - 4))
-            elif terrain_type == FARMLAND:
-                for i in range(2, TILE_SIZE - 2, 4):
-                    pygame.draw.line(surf, (r - 15, g - 15, b - 10), (i, 2), (i, TILE_SIZE - 2))
-            elif terrain_type == SNOW:
-                for _ in range(5):
-                    x = hash(_ * 17) % TILE_SIZE
-                    y = hash(_ * 23) % TILE_SIZE
-                    pygame.draw.circle(surf, (250, 252, 255), (x, y), 2)
-            elif terrain_type == SAND:
-                # Sandy beach with subtle grain
-                for _ in range(8):
-                    gx = hash(_ * 11 + 5) % TILE_SIZE
-                    gy = hash(_ * 19 + 3) % TILE_SIZE
-                    shade = (min(255, r + 8), min(255, g + 5), min(255, b + 3))
-                    surf.set_at((gx, gy), shade)
-                # Occasional pebble
-                px = hash(7) % (TILE_SIZE - 2) + 1
-                py = hash(13) % (TILE_SIZE - 2) + 1
-                pygame.draw.circle(surf, (max(0, r - 30), max(0, g - 25), max(0, b - 20)),
-                                   (px, py), 1)
-            elif terrain_type == SWAMP:
-                # Murky swamp with reeds and bubbles
-                # Murky water patches
-                for _ in range(3):
-                    px = hash(_ * 9 + 2) % (TILE_SIZE - 4) + 2
-                    py = hash(_ * 15 + 1) % (TILE_SIZE - 4) + 2
-                    pygame.draw.circle(surf, (max(0, r - 10), max(0, g - 8), max(0, b - 5)),
-                                       (px, py), 3)
-                # Reed stalks
-                for i in range(3):
-                    rx = hash(i * 13 + 7) % (TILE_SIZE - 2) + 1
-                    pygame.draw.line(surf, (60, 90, 40), (rx, TILE_SIZE - 2), (rx, TILE_SIZE // 3))
-                    pygame.draw.circle(surf, (70, 100, 45), (rx, TILE_SIZE // 3), 1)
-                # Bubble
-                bx = hash(42) % (TILE_SIZE - 4) + 2
-                by = hash(99) % (TILE_SIZE - 4) + 2
-                pygame.draw.circle(surf, (min(255, r + 20), min(255, g + 25), min(255, b + 15)),
-                                   (bx, by), 1)
-            elif terrain_type == BUILT_WALL:
-                pygame.draw.rect(surf, (r + 10, g + 10, b + 10), (2, 2, TILE_SIZE - 4, TILE_SIZE - 4))
-                pygame.draw.rect(surf, (r - 15, g - 15, b - 15), (2, 2, TILE_SIZE - 4, TILE_SIZE - 4), 2)
-                # Brick pattern
-                for by in range(4, TILE_SIZE - 4, 6):
-                    pygame.draw.line(surf, (r - 10, g - 10, b - 10), (3, by), (TILE_SIZE - 3, by))
-            elif terrain_type == BUILT_FLOOR:
-                for bx in range(0, TILE_SIZE, 8):
-                    for by in range(0, TILE_SIZE, 8):
-                        c = (r + (bx * 3) % 10, g + (by * 3) % 10, b)
-                        pygame.draw.rect(surf, c, (bx, by, 7, 7))
-            elif terrain_type == TREE_STUMP:
-                pygame.draw.circle(surf, (90, 70, 45), (TILE_SIZE // 2, TILE_SIZE // 2), 5)
-                pygame.draw.circle(surf, (70, 55, 35), (TILE_SIZE // 2, TILE_SIZE // 2), 5, 1)
-            elif terrain_type == TILLED_SOIL:
-                for i in range(2, TILE_SIZE - 2, 4):
-                    pygame.draw.line(surf, (r - 10, g - 10, b - 5), (i, 2), (i, TILE_SIZE - 2))
-                for sx_pos in range(6, TILE_SIZE - 4, 10):
-                    pygame.draw.line(surf, (60, 140, 40), (sx_pos, TILE_SIZE // 2), (sx_pos, TILE_SIZE // 2 - 4))
-            elif terrain_type == TABLE:
-                # Table surface on floor
-                surf.fill((160, 130, 95))  # floor base
-                pygame.draw.rect(surf, (r, g, b), (4, 6, TILE_SIZE - 8, TILE_SIZE - 12))
-                pygame.draw.rect(surf, (r - 20, g - 20, b - 15), (4, 6, TILE_SIZE - 8, TILE_SIZE - 12), 2)
-            elif terrain_type == BED:
-                surf.fill((160, 130, 95))  # floor base
-                pygame.draw.rect(surf, (r, g, b), (4, 2, TILE_SIZE - 8, TILE_SIZE - 4))
-                pygame.draw.rect(surf, (180, 160, 140), (6, 3, TILE_SIZE - 12, 10))  # pillow
-                pygame.draw.rect(surf, (r - 20, g - 15, b - 10), (4, 2, TILE_SIZE - 8, TILE_SIZE - 4), 1)
-            elif terrain_type == CHEST:
-                surf.fill((160, 130, 95))  # floor base
-                pygame.draw.rect(surf, (r, g, b), (6, 8, TILE_SIZE - 12, TILE_SIZE - 16))
-                pygame.draw.rect(surf, (r - 30, g - 30, b - 20), (6, 8, TILE_SIZE - 12, TILE_SIZE - 16), 2)
-                pygame.draw.rect(surf, (200, 180, 60), (TILE_SIZE // 2 - 3, TILE_SIZE // 2 - 2, 6, 4))  # lock
-            elif terrain_type == DOOR:
-                surf.fill((160, 130, 95))  # floor base
-                pygame.draw.rect(surf, (r, g, b), (2, 0, TILE_SIZE - 4, TILE_SIZE))
-                pygame.draw.circle(surf, (200, 180, 60), (TILE_SIZE - 8, TILE_SIZE // 2), 3)  # handle
-                pygame.draw.line(surf, (r - 20, g - 20, b - 15), (TILE_SIZE // 2, 2), (TILE_SIZE // 2, TILE_SIZE - 2), 1)
-            elif terrain_type == STAIRS_UP:
-                surf.fill((160, 130, 95))
-                for i in range(5):
-                    shade = r - i * 8
-                    y_pos = 4 + i * 5
-                    pygame.draw.rect(surf, (shade, shade - 10, shade - 20), (4, y_pos, TILE_SIZE - 8, 4))
-                pygame.draw.polygon(surf, (200, 200, 80), [(TILE_SIZE // 2, 2), (TILE_SIZE // 2 - 4, 10), (TILE_SIZE // 2 + 4, 10)])
-            elif terrain_type == STAIRS_DOWN:
-                surf.fill((100, 90, 85))
-                for i in range(5):
-                    shade = 60 + i * 8
-                    y_pos = 4 + i * 5
-                    pygame.draw.rect(surf, (shade, shade - 5, shade - 10), (4, y_pos, TILE_SIZE - 8, 4))
-                pygame.draw.polygon(surf, (200, 80, 80), [(TILE_SIZE // 2, TILE_SIZE - 4), (TILE_SIZE // 2 - 4, TILE_SIZE - 12), (TILE_SIZE // 2 + 4, TILE_SIZE - 12)])
-
-            # Resource terrain types
-            elif terrain_type == ORE_VEIN:
-                surf.fill((139, 119, 101))  # mountain-like base
-                # Ore sparkles
-                for i in range(3):
-                    ox = (hash(i * 7) % (TILE_SIZE - 4)) + 2
-                    oy = (hash(i * 13) % (TILE_SIZE - 4)) + 2
-                    pygame.draw.circle(surf, (200, 170, 80), (ox, oy), max(1, TILE_SIZE // 10))
-            elif terrain_type == HERB_PATCH:
-                # Green patch with small plants
-                for i in range(4):
-                    px = (hash(i * 11) % (TILE_SIZE - 2)) + 1
-                    py = TILE_SIZE // 2 + (hash(i * 17) % (TILE_SIZE // 2))
-                    pygame.draw.line(surf, (40, 120, 50), (px, py), (px, py - TILE_SIZE // 4))
-                    pygame.draw.circle(surf, (50, 140, 60), (px, py - TILE_SIZE // 4), max(1, TILE_SIZE // 8))
-            elif terrain_type == BERRY_BUSH:
-                # Bush with red berries
-                cx, cy = TILE_SIZE // 2, TILE_SIZE // 2
-                pygame.draw.circle(surf, (60, 120, 50), (cx, cy), TILE_SIZE // 3)
-                for i in range(4):
-                    bx = cx + (hash(i * 7) % 6) - 3
-                    by = cy + (hash(i * 11) % 6) - 3
-                    pygame.draw.circle(surf, (180, 40, 50), (bx, by), max(1, TILE_SIZE // 10))
-            elif terrain_type == CLAY_PIT:
-                # Brown muddy area
-                pygame.draw.ellipse(surf, (r - 10, g - 10, b - 10),
-                                   (2, 2, TILE_SIZE - 4, TILE_SIZE - 4))
-            elif terrain_type == MUSHROOMS:
-                # Small mushroom caps
-                for i in range(3):
-                    mx = TILE_SIZE // 4 + (hash(i * 9) % (TILE_SIZE // 2))
-                    my = TILE_SIZE // 2 + (hash(i * 5) % (TILE_SIZE // 3))
-                    pygame.draw.rect(surf, (120, 100, 70), (mx, my, 1, TILE_SIZE // 5))
-                    pygame.draw.circle(surf, (r, g, b), (mx, my), max(1, TILE_SIZE // 7))
-            elif terrain_type == WHEAT_FIELD:
-                # Golden wheat stalks
-                for i in range(0, TILE_SIZE, max(2, TILE_SIZE // 5)):
-                    pygame.draw.line(surf, (r - 20, g - 20, b - 10), (i, TILE_SIZE), (i + 1, TILE_SIZE // 3))
-                    pygame.draw.circle(surf, (r, g, b), (i + 1, TILE_SIZE // 3), max(1, TILE_SIZE // 10))
-            elif terrain_type == VEGETABLE_PLOT:
-                # Rows of green
-                for i in range(2, TILE_SIZE - 2, max(3, TILE_SIZE // 4)):
-                    pygame.draw.line(surf, (r - 10, g - 15, b - 5), (i, 2), (i, TILE_SIZE - 2))
-                    pygame.draw.circle(surf, (60, 180, 50), (i, TILE_SIZE // 3), max(1, TILE_SIZE // 8))
-            elif terrain_type == FRUIT_TREE:
-                cx, cy = TILE_SIZE // 2, TILE_SIZE // 2
-                pygame.draw.circle(surf, (50, 130, 50), (cx, cy - 2), TILE_SIZE // 3)
-                pygame.draw.rect(surf, (80, 50, 30), (cx - 1, cy + TILE_SIZE // 6, 2, TILE_SIZE // 4))
-                # Fruit dots
-                pygame.draw.circle(surf, (200, 50, 40), (cx - 2, cy - 3), max(1, TILE_SIZE // 10))
-                pygame.draw.circle(surf, (200, 50, 40), (cx + 3, cy - 1), max(1, TILE_SIZE // 10))
-            elif terrain_type == FLOWER_BED:
-                # Colorful flowers on grass
-                colors = [(200, 80, 80), (200, 200, 80), (150, 80, 200), (80, 150, 200)]
-                for i, fc in enumerate(colors):
-                    fx = (hash(i * 7) % (TILE_SIZE - 4)) + 2
-                    fy = (hash(i * 13) % (TILE_SIZE - 4)) + 2
-                    pygame.draw.circle(surf, fc, (fx, fy), max(1, TILE_SIZE // 8))
-            elif terrain_type == COBBLESTONE:
-                # Paved cobblestone road with stone pattern
-                for i in range(4):
-                    for j in range(4):
-                        bx = i * 4 + (j % 2)
-                        by = j * 4
-                        shade = 135 + ((i + j) % 3) * 8
-                        pygame.draw.rect(surf, (shade, shade, shade + 5), (bx, by, 3, 3))
-                        pygame.draw.rect(surf, (shade - 15, shade - 15, shade - 10), (bx, by, 3, 3), 1)
-            elif terrain_type == DIRT_TRACK:
-                # Beaten earth path with footprints
-                for i in range(3):
-                    fx = 4 + i * 5
-                    fy = 3 + (i * 7) % 10
-                    pygame.draw.ellipse(surf, (r - 10, g - 10, b - 8), (fx, fy, 3, 4))
-            elif terrain_type == MOUNTAIN_PASS:
-                # Rocky pass with gravel texture
-                for i in range(5):
-                    px = (hash(i * 11) % (TILE_SIZE - 3)) + 1
-                    py = (hash(i * 17) % (TILE_SIZE - 3)) + 1
-                    pygame.draw.circle(surf, (r - 10, g - 10, b - 8), (px, py), 2)
-            elif terrain_type == CLIFF:
-                # Dark cliff face with vertical striations
-                for i in range(0, TILE_SIZE, 3):
-                    shade = max(0, r - 15 - (i % 2) * 10)
-                    pygame.draw.line(surf, (shade, max(0, g - 15 - (i % 2) * 10), max(0, b - 15 - (i % 2) * 10)),
-                                     (i, 0), (i, TILE_SIZE))
-                # Horizontal cracks
-                for i in range(3):
-                    y_pos = 4 + i * 5
-                    pygame.draw.line(surf, (max(0, r - 30), max(0, g - 30), max(0, b - 30)),
-                                     (1, y_pos), (TILE_SIZE - 2, y_pos))
-            elif terrain_type == SHALLOW_WATER:
-                # Lighter blue with ripple lines
-                surf.fill((min(255, r + 10), min(255, g + 10), min(255, b + 10)))
-                for i in range(4):
-                    y_pos = 3 + i * 4
-                    ripple_color = (min(255, r + 30), min(255, g + 30), min(255, b + 25))
-                    for px in range(TILE_SIZE):
-                        offset = (px * 2 + i * 5) % 6
-                        if offset < 3:
-                            surf.set_at((px, y_pos), ripple_color)
-                # Light sparkles
-                for i in range(3):
-                    sx = (hash(i * 11 + 5) % (TILE_SIZE - 2)) + 1
-                    sy = (hash(i * 19 + 3) % (TILE_SIZE - 2)) + 1
-                    surf.set_at((sx, sy), (min(255, r + 50), min(255, g + 50), min(255, b + 40)))
-            elif terrain_type == ROCKY_GROUND:
-                # Brown-grey with rock dots
-                for i in range(6):
-                    rx = (hash(i * 7 + 2) % (TILE_SIZE - 4)) + 2
-                    ry = (hash(i * 13 + 5) % (TILE_SIZE - 4)) + 2
-                    rock_shade = (max(0, r - 10 + (i % 3) * 5),
-                                  max(0, g - 10 + (i % 3) * 5),
-                                  max(0, b - 8 + (i % 3) * 5))
-                    pygame.draw.circle(surf, rock_shade, (rx, ry), 2)
-                    pygame.draw.circle(surf, (max(0, r - 20), max(0, g - 20), max(0, b - 15)),
-                                       (rx, ry), 2, 1)
-            elif terrain_type == MARSH:
-                # Dark green with water spots
-                for i in range(4):
-                    wx = (hash(i * 9 + 1) % (TILE_SIZE - 4)) + 2
-                    wy = (hash(i * 15 + 3) % (TILE_SIZE - 4)) + 2
-                    pygame.draw.circle(surf, (50, 90, 110), (wx, wy), 3)
-                    pygame.draw.circle(surf, (60, 100, 120), (wx, wy), 2)
-                # Reed tufts
-                for i in range(3):
-                    rx = (hash(i * 11 + 7) % (TILE_SIZE - 2)) + 1
-                    pygame.draw.line(surf, (50, 100, 40), (rx, TILE_SIZE - 1), (rx, TILE_SIZE // 3))
-            elif terrain_type == GRAVEL_ROAD:
-                # Grey-brown with gravel dots
-                for i in range(10):
-                    gx = (hash(i * 7 + 3) % (TILE_SIZE - 2)) + 1
-                    gy = (hash(i * 11 + 9) % (TILE_SIZE - 2)) + 1
-                    dot_shade = (max(0, r - 8 + (i % 3) * 6),
-                                 max(0, g - 8 + (i % 3) * 6),
-                                 max(0, b - 6 + (i % 3) * 6))
-                    pygame.draw.circle(surf, dot_shade, (gx, gy), 1)
-                # Center line (worn path)
-                pygame.draw.line(surf, (max(0, r - 12), max(0, g - 12), max(0, b - 10)),
-                                 (TILE_SIZE // 2, 0), (TILE_SIZE // 2, TILE_SIZE))
-            elif terrain_type == FALLEN_TREE:
-                # Brown trunk shape on grass background
-                surf.fill((86, 152, 72))  # grass base
-                # Trunk
-                pygame.draw.rect(surf, (100, 70, 35), (2, TILE_SIZE // 2 - 2, TILE_SIZE - 4, 4))
-                pygame.draw.rect(surf, (80, 55, 25), (2, TILE_SIZE // 2 - 2, TILE_SIZE - 4, 4), 1)
-                # Broken branches
-                pygame.draw.line(surf, (90, 65, 30), (4, TILE_SIZE // 2), (2, TILE_SIZE // 2 - 4))
-                pygame.draw.line(surf, (90, 65, 30), (TILE_SIZE - 6, TILE_SIZE // 2), (TILE_SIZE - 3, TILE_SIZE // 2 + 4))
-                # Leaf scatter
-                for i in range(3):
-                    lx = (hash(i * 13 + 1) % (TILE_SIZE - 4)) + 2
-                    ly = (hash(i * 7 + 5) % (TILE_SIZE - 4)) + 2
-                    pygame.draw.circle(surf, (70, 130, 55), (lx, ly), 1)
-            elif terrain_type == RUBBLE:
-                # Grey debris pattern
-                for i in range(8):
-                    rx = (hash(i * 7 + 4) % (TILE_SIZE - 4)) + 2
-                    ry = (hash(i * 11 + 6) % (TILE_SIZE - 4)) + 2
-                    size = 1 + (i % 3)
-                    debris_shade = (max(0, r - 10 + (i % 4) * 5),
-                                    max(0, g - 10 + (i % 4) * 5),
-                                    max(0, b - 8 + (i % 4) * 5))
-                    pygame.draw.rect(surf, debris_shade, (rx, ry, size, size))
-                    pygame.draw.rect(surf, (max(0, r - 25), max(0, g - 25), max(0, b - 20)),
-                                     (rx, ry, size, size), 1)
-            elif terrain_type == GORGE:
-                # Very dark with depth lines
-                surf.fill((max(0, r - 10), max(0, g - 10), max(0, b - 10)))
-                for i in range(5):
-                    y_pos = 2 + i * 3
-                    depth_color = (max(0, r - 20 - i * 5), max(0, g - 20 - i * 5), max(0, b - 15 - i * 5))
-                    pygame.draw.line(surf, depth_color, (1, y_pos), (TILE_SIZE - 1, y_pos))
-                # Dark center
-                pygame.draw.rect(surf, (max(0, r - 30), max(0, g - 30), max(0, b - 25)),
-                                 (TILE_SIZE // 4, TILE_SIZE // 4, TILE_SIZE // 2, TILE_SIZE // 2))
-            elif terrain_type == WELL:
-                # Stone circle with dark center on floor
-                surf.fill((86, 152, 72))  # grass base
-                cx, cy = TILE_SIZE // 2, TILE_SIZE // 2
-                # Stone ring
-                pygame.draw.circle(surf, (140, 135, 125), (cx, cy), 6)
-                pygame.draw.circle(surf, (100, 95, 85), (cx, cy), 6, 1)
-                # Dark water center
-                pygame.draw.circle(surf, (20, 40, 60), (cx, cy), 4)
-                # Highlight
-                pygame.draw.circle(surf, (40, 70, 100), (cx - 1, cy - 1), 1)
-            elif terrain_type == PILLAR:
-                # Grey stone column on floor
-                surf.fill((160, 130, 95))  # floor base
-                cx = TILE_SIZE // 2
-                # Column shaft
-                pygame.draw.rect(surf, (r, g, b), (cx - 3, 3, 6, TILE_SIZE - 6))
-                # Capital (top)
-                pygame.draw.rect(surf, (min(255, r + 10), min(255, g + 10), min(255, b + 10)),
-                                 (cx - 4, 2, 8, 3))
-                # Base
-                pygame.draw.rect(surf, (min(255, r + 10), min(255, g + 10), min(255, b + 10)),
-                                 (cx - 4, TILE_SIZE - 5, 8, 3))
-                # Vertical highlight
-                pygame.draw.line(surf, (min(255, r + 15), min(255, g + 15), min(255, b + 15)),
-                                 (cx - 1, 4), (cx - 1, TILE_SIZE - 5))
-            elif terrain_type == ALTAR:
-                # Ornate stone on floor
-                surf.fill((160, 130, 95))  # floor base
-                cx, cy = TILE_SIZE // 2, TILE_SIZE // 2
-                # Stone platform
-                pygame.draw.rect(surf, (r, g, b), (3, cy - 1, TILE_SIZE - 6, TILE_SIZE // 2 + 1))
-                # Top slab
-                pygame.draw.rect(surf, (min(255, r + 15), min(255, g + 12), min(255, b + 8)),
-                                 (2, cy - 3, TILE_SIZE - 4, 4))
-                # Decorative marks
-                pygame.draw.line(surf, (200, 180, 100), (5, cy - 2), (TILE_SIZE - 5, cy - 2))
-                pygame.draw.circle(surf, (200, 180, 100), (cx, cy - 2), 2, 1)
-            elif terrain_type == FIREPLACE:
-                # Orange glow with flame shapes on floor
-                surf.fill((160, 130, 95))  # floor base
-                cx, cy = TILE_SIZE // 2, TILE_SIZE // 2
-                # Stone hearth
-                pygame.draw.rect(surf, (100, 90, 80), (3, cy - 2, TILE_SIZE - 6, TILE_SIZE // 2 + 2))
-                # Orange glow
-                pygame.draw.circle(surf, (220, 120, 30), (cx, cy), 4)
-                pygame.draw.circle(surf, (240, 160, 40), (cx, cy), 3)
-                # Flame tips
-                pygame.draw.polygon(surf, (250, 200, 60),
-                                    [(cx, cy - 5), (cx - 2, cy - 1), (cx + 2, cy - 1)])
-                pygame.draw.polygon(surf, (240, 140, 30),
-                                    [(cx + 2, cy - 3), (cx + 1, cy), (cx + 3, cy)])
-            elif terrain_type == THRONE:
-                # Gold/ornate seat on floor
-                surf.fill((160, 130, 95))  # floor base
-                cx = TILE_SIZE // 2
-                # Seat back (tall)
-                pygame.draw.rect(surf, (r, g, b), (cx - 4, 2, 8, TILE_SIZE - 6))
-                # Armrests
-                pygame.draw.rect(surf, (max(0, r - 15), max(0, g - 15), max(0, b - 10)),
-                                 (cx - 6, TILE_SIZE // 2, 2, TILE_SIZE // 3))
-                pygame.draw.rect(surf, (max(0, r - 15), max(0, g - 15), max(0, b - 10)),
-                                 (cx + 4, TILE_SIZE // 2, 2, TILE_SIZE // 3))
-                # Crown ornament on top
-                pygame.draw.polygon(surf, (220, 190, 50),
-                                    [(cx - 3, 3), (cx, 1), (cx + 3, 3)])
-                # Gold highlights
-                pygame.draw.line(surf, (220, 190, 50), (cx - 3, 4), (cx - 3, TILE_SIZE // 2))
-                pygame.draw.line(surf, (220, 190, 50), (cx + 3, 4), (cx + 3, TILE_SIZE // 2))
-            elif terrain_type == BOOKSHELF:
-                # Brown with book lines on floor
-                surf.fill((160, 130, 95))  # floor base
-                # Shelf frame
-                pygame.draw.rect(surf, (r, g, b), (3, 2, TILE_SIZE - 6, TILE_SIZE - 4))
-                pygame.draw.rect(surf, (max(0, r - 20), max(0, g - 15), max(0, b - 10)),
-                                 (3, 2, TILE_SIZE - 6, TILE_SIZE - 4), 1)
-                # Shelf dividers
-                for i in range(3):
-                    sy = 5 + i * 5
-                    pygame.draw.line(surf, (max(0, r - 15), max(0, g - 10), max(0, b - 5)),
-                                     (4, sy), (TILE_SIZE - 4, sy))
-                # Book spines (colored rectangles)
-                book_colors = [(140, 40, 40), (40, 80, 140), (40, 120, 60), (160, 120, 40)]
-                for i, bc in enumerate(book_colors):
-                    bx = 5 + i * 3
-                    by = 3
-                    pygame.draw.rect(surf, bc, (bx, by, 2, 4))
-                    pygame.draw.rect(surf, bc, (bx, by + 6, 2, 4))
-            elif terrain_type == BARREL:
-                # Brown circle with bands on floor
-                surf.fill((160, 130, 95))  # floor base
-                cx, cy = TILE_SIZE // 2, TILE_SIZE // 2
-                # Barrel body
-                pygame.draw.circle(surf, (r, g, b), (cx, cy), 6)
-                pygame.draw.circle(surf, (max(0, r - 20), max(0, g - 15), max(0, b - 10)),
-                                   (cx, cy), 6, 1)
-                # Metal bands
-                pygame.draw.circle(surf, (80, 80, 70), (cx, cy), 5, 1)
-                pygame.draw.circle(surf, (80, 80, 70), (cx, cy), 3, 1)
-            elif terrain_type == ANVIL:
-                # Dark grey anvil shape on floor
-                surf.fill((160, 130, 95))  # floor base
-                cx, cy = TILE_SIZE // 2, TILE_SIZE // 2
-                # Anvil base
-                pygame.draw.rect(surf, (max(0, r - 10), max(0, g - 10), max(0, b - 10)),
-                                 (cx - 4, cy + 2, 8, 4))
-                # Anvil top (wider)
-                pygame.draw.rect(surf, (r, g, b), (cx - 5, cy - 2, 10, 4))
-                # Horn (pointed end)
-                pygame.draw.polygon(surf, (min(255, r + 5), min(255, g + 5), min(255, b + 8)),
-                                    [(cx - 5, cy - 1), (cx - 7, cy), (cx - 5, cy + 1)])
-                # Highlight
-                pygame.draw.line(surf, (min(255, r + 15), min(255, g + 15), min(255, b + 18)),
-                                 (cx - 3, cy - 2), (cx + 3, cy - 2))
-            elif terrain_type == FORGE_FIRE:
-                # Bright orange/red forge on floor
-                surf.fill((160, 130, 95))  # floor base
-                cx, cy = TILE_SIZE // 2, TILE_SIZE // 2
-                # Fire pit
-                pygame.draw.rect(surf, (80, 70, 60), (3, 3, TILE_SIZE - 6, TILE_SIZE - 6))
-                # Hot coals
-                pygame.draw.circle(surf, (r, g, b), (cx, cy), 5)
-                pygame.draw.circle(surf, (min(255, r + 20), min(255, g + 40), min(255, b + 20)),
-                                   (cx, cy), 3)
-                # Flame
-                pygame.draw.polygon(surf, (250, 200, 50),
-                                    [(cx, cy - 6), (cx - 3, cy - 1), (cx + 3, cy - 1)])
-                # Sparks
-                for i in range(3):
-                    sx = cx + (hash(i * 7) % 6) - 3
-                    sy = cy - 4 - (hash(i * 11) % 3)
-                    surf.set_at((max(0, min(TILE_SIZE - 1, sx)), max(0, min(TILE_SIZE - 1, sy))),
-                                (255, 220, 80))
-            elif terrain_type == FOUNTAIN:
-                # Blue center with stone edge
-                surf.fill((160, 130, 95))  # floor base
-                cx, cy = TILE_SIZE // 2, TILE_SIZE // 2
-                # Stone basin
-                pygame.draw.circle(surf, (130, 125, 115), (cx, cy), 7)
-                pygame.draw.circle(surf, (100, 95, 85), (cx, cy), 7, 1)
-                # Water
-                pygame.draw.circle(surf, (r, g, b), (cx, cy), 5)
-                # Center spout
-                pygame.draw.circle(surf, (min(255, r + 40), min(255, g + 30), min(255, b + 20)),
-                                   (cx, cy), 2)
-                # Water highlight
-                surf.set_at((cx - 1, cy - 2), (min(255, r + 60), min(255, g + 50), min(255, b + 30)))
-            elif terrain_type == CARPET:
-                # Red/maroon with border pattern
-                # Border
-                pygame.draw.rect(surf, (max(0, r - 30), max(0, g - 15), max(0, b - 15)),
-                                 (0, 0, TILE_SIZE, TILE_SIZE))
-                # Inner carpet
-                pygame.draw.rect(surf, (r, g, b), (2, 2, TILE_SIZE - 4, TILE_SIZE - 4))
-                # Decorative pattern
-                pygame.draw.rect(surf, (min(255, r + 20), min(255, g + 10), min(255, b + 10)),
-                                 (4, 4, TILE_SIZE - 8, TILE_SIZE - 8), 1)
-                # Center diamond
-                cx, cy = TILE_SIZE // 2, TILE_SIZE // 2
-                pygame.draw.polygon(surf, (min(255, r + 30), min(255, g + 15), min(255, b + 15)),
-                                    [(cx, cy - 3), (cx + 3, cy), (cx, cy + 3), (cx - 3, cy)])
-            elif terrain_type == MOSAIC:
-                # Colorful geometric tiles
-                tile_colors = [
-                    (180, 140, 80), (80, 120, 160), (160, 80, 80), (80, 140, 100),
-                    (140, 100, 140), (160, 150, 90)
-                ]
-                for i in range(4):
-                    for j in range(4):
-                        mx = i * 4
-                        my = j * 4
-                        mc = tile_colors[(i + j * 3) % len(tile_colors)]
-                        pygame.draw.rect(surf, mc, (mx + 1, my + 1, 3, 3))
-                # Grout lines
-                for i in range(1, 4):
-                    pygame.draw.line(surf, (max(0, r - 20), max(0, g - 15), max(0, b - 10)),
-                                     (i * 4, 0), (i * 4, TILE_SIZE))
-                    pygame.draw.line(surf, (max(0, r - 20), max(0, g - 15), max(0, b - 10)),
-                                     (0, i * 4), (TILE_SIZE, i * 4))
-            elif terrain_type == ARCHWAY:
-                # Stone arch on floor
-                surf.fill((160, 130, 95))  # floor base
-                cx = TILE_SIZE // 2
-                # Arch pillars
-                pygame.draw.rect(surf, (r, g, b), (2, 4, 3, TILE_SIZE - 4))
-                pygame.draw.rect(surf, (r, g, b), (TILE_SIZE - 5, 4, 3, TILE_SIZE - 4))
-                # Arch curve (top)
-                pygame.draw.arc(surf, (r, g, b),
-                                (2, 2, TILE_SIZE - 4, TILE_SIZE // 2), 0, 3.14159, 2)
-                # Keystone
-                pygame.draw.rect(surf, (min(255, r + 15), min(255, g + 12), min(255, b + 8)),
-                                 (cx - 2, 2, 4, 3))
-            elif terrain_type == IRON_GATE:
-                # Dark grey bars on floor
-                surf.fill((160, 130, 95))  # floor base
-                # Vertical bars
-                for i in range(3, TILE_SIZE - 2, 3):
-                    pygame.draw.line(surf, (r, g, b), (i, 1), (i, TILE_SIZE - 1))
-                # Horizontal crossbar
-                pygame.draw.line(surf, (min(255, r + 10), min(255, g + 10), min(255, b + 12)),
-                                 (2, TILE_SIZE // 3), (TILE_SIZE - 2, TILE_SIZE // 3))
-                pygame.draw.line(surf, (min(255, r + 10), min(255, g + 10), min(255, b + 12)),
-                                 (2, TILE_SIZE * 2 // 3), (TILE_SIZE - 2, TILE_SIZE * 2 // 3))
-            elif terrain_type == STABLE_FLOOR:
-                # Wood plank pattern with hay
-                for i in range(0, TILE_SIZE, 6):
-                    plank_shade = max(0, r + (i * 2) % 12 - 6)
-                    pygame.draw.rect(surf, (plank_shade, max(0, g + (i % 6) - 3), max(0, b - 2)),
-                                     (0, i, TILE_SIZE, 5))
-                    pygame.draw.line(surf, (max(0, r - 15), max(0, g - 12), max(0, b - 8)),
-                                     (0, i), (TILE_SIZE, i))
-                # Hay scatter
-                for i in range(4):
-                    hx = (hash(i * 9 + 2) % (TILE_SIZE - 2)) + 1
-                    hy = (hash(i * 15 + 7) % (TILE_SIZE - 2)) + 1
-                    pygame.draw.line(surf, (180, 160, 60), (hx, hy), (hx + 2, hy + 1))
-            elif terrain_type == GEM_DEPOSIT:
-                # Rocky base with gem sparkles
-                surf.fill((139, 119, 101))  # mountain-like base
-                for i in range(3):
-                    gx = (hash(i * 11 + 1) % (TILE_SIZE - 4)) + 2
-                    gy = (hash(i * 17 + 3) % (TILE_SIZE - 4)) + 2
-                    pygame.draw.polygon(surf, (180, 100, 200),
-                                        [(gx, gy - 2), (gx + 2, gy), (gx, gy + 2), (gx - 2, gy)])
-                    surf.set_at((gx, gy - 1), (220, 180, 240))
-            elif terrain_type == COPPER_VEIN:
-                # Rocky base with copper streaks
-                surf.fill((139, 119, 101))
-                for i in range(4):
-                    cx_pos = (hash(i * 9 + 2) % (TILE_SIZE - 4)) + 2
-                    cy_pos = (hash(i * 13 + 5) % (TILE_SIZE - 4)) + 2
-                    pygame.draw.circle(surf, (r, g, b), (cx_pos, cy_pos), 2)
-                    surf.set_at((cx_pos, cy_pos), (min(255, r + 20), min(255, g + 10), max(0, b - 5)))
-            elif terrain_type == FLAX_FIELD:
-                # Tall thin stalks with blue flowers
-                for i in range(0, TILE_SIZE, max(2, TILE_SIZE // 5)):
-                    pygame.draw.line(surf, (max(0, r - 20), min(255, g + 10), max(0, b - 20)),
-                                     (i, TILE_SIZE), (i, TILE_SIZE // 4))
-                    pygame.draw.circle(surf, (100, 130, 200), (i, TILE_SIZE // 4), 1)
-            elif terrain_type == BEEHIVE:
-                # Golden hive shape
-                surf.fill((86, 152, 72))  # grass base
-                cx, cy = TILE_SIZE // 2, TILE_SIZE // 2
-                pygame.draw.ellipse(surf, (r, g, b), (cx - 5, cy - 4, 10, 10))
-                # Hexagonal pattern hint
-                for i in range(3):
-                    y_pos = cy - 2 + i * 3
-                    pygame.draw.line(surf, (max(0, r - 25), max(0, g - 25), max(0, b - 10)),
-                                     (cx - 3, y_pos), (cx + 3, y_pos))
-                # Entry hole
-                pygame.draw.circle(surf, (80, 60, 20), (cx, cy + 3), 1)
-            elif terrain_type == SALT_FLAT:
-                # White crystalline surface
-                for i in range(6):
-                    sx = (hash(i * 7 + 3) % (TILE_SIZE - 2)) + 1
-                    sy = (hash(i * 13 + 9) % (TILE_SIZE - 2)) + 1
-                    pygame.draw.rect(surf, (min(255, r + 10), min(255, g + 10), min(255, b + 8)),
-                                     (sx, sy, 2, 2))
-                # Crack lines
-                for i in range(2):
-                    cx_s = (hash(i * 17) % (TILE_SIZE - 4)) + 2
-                    cy_s = (hash(i * 23) % (TILE_SIZE - 4)) + 2
-                    pygame.draw.line(surf, (max(0, r - 15), max(0, g - 15), max(0, b - 12)),
-                                     (cx_s, cy_s), (cx_s + 4, cy_s + 3))
-            elif terrain_type == LADDER_UP:
-                # Ladder going up on floor
-                surf.fill((160, 130, 95))
-                cx = TILE_SIZE // 2
-                # Side rails
-                pygame.draw.line(surf, (r, g, b), (cx - 4, 2), (cx - 4, TILE_SIZE - 2))
-                pygame.draw.line(surf, (r, g, b), (cx + 4, 2), (cx + 4, TILE_SIZE - 2))
-                # Rungs
-                for i in range(4):
-                    y_pos = 4 + i * 4
-                    pygame.draw.line(surf, (min(255, r + 10), min(255, g + 10), max(0, b + 5)),
-                                     (cx - 3, y_pos), (cx + 3, y_pos))
-                # Up arrow
-                pygame.draw.polygon(surf, (200, 200, 80),
-                                    [(cx, 1), (cx - 3, 5), (cx + 3, 5)])
-            elif terrain_type == LADDER_DOWN:
-                # Ladder going down on floor
-                surf.fill((160, 130, 95))
-                cx = TILE_SIZE // 2
-                pygame.draw.line(surf, (r, g, b), (cx - 4, 2), (cx - 4, TILE_SIZE - 2))
-                pygame.draw.line(surf, (r, g, b), (cx + 4, 2), (cx + 4, TILE_SIZE - 2))
-                for i in range(4):
-                    y_pos = 4 + i * 4
-                    pygame.draw.line(surf, (min(255, r + 10), min(255, g + 10), max(0, b + 5)),
-                                     (cx - 3, y_pos), (cx + 3, y_pos))
-                # Down arrow
-                pygame.draw.polygon(surf, (200, 80, 80),
-                                    [(cx, TILE_SIZE - 2), (cx - 3, TILE_SIZE - 6), (cx + 3, TILE_SIZE - 6)])
-            elif terrain_type == GRAVESTONE:
-                # Small stone marker on grass
-                surf.fill(TERRAIN_COLORS.get(GRASS, (86, 152, 72)))
-                cx = TILE_SIZE // 2
-                # Stone base
-                pygame.draw.rect(surf, (120, 115, 110),
-                                 (cx - 3, TILE_SIZE - 5, 6, 3))
-                # Headstone
-                pygame.draw.rect(surf, (r, g, b),
-                                 (cx - 2, TILE_SIZE // 2 - 2, 5, TILE_SIZE // 2 + 1))
-                # Rounded top
-                pygame.draw.circle(surf, (r, g, b), (cx, TILE_SIZE // 2 - 2), 3)
-                # Cross or inscription mark
-                pygame.draw.line(surf, (110, 105, 100),
-                                 (cx, TILE_SIZE // 2 - 1), (cx, TILE_SIZE // 2 + 3))
-                pygame.draw.line(surf, (110, 105, 100),
-                                 (cx - 1, TILE_SIZE // 2 + 1), (cx + 1, TILE_SIZE // 2 + 1))
-
-            self._tile_cache[terrain_type] = surf
+    def _DEAD_CODE_build_tile_cache_original(self):  # noqa: N802
+        """DEAD CODE — Original tile cache builder extracted to renderer_tiles.py.
+        This method is never called. Left temporarily until the next cleanup pass.
+        """
+        return  # Dead code removed; original tile cache lives in renderer_tiles.py
 
     # ================================================================
     # SEASONAL COLOR PALETTE SYSTEM
@@ -892,6 +254,20 @@ class Renderer:
         self._seasonal_color_cache[(SHALLOW_WATER, "winter")] = (140, 180, 215)
         self._seasonal_color_cache[(FRUIT_TREE, "winter")] = (110, 105, 95)
         self._seasonal_color_cache[(HERB_PATCH, "winter")] = (130, 135, 120)
+
+        # --- Crop tiles (WHEAT_FIELD, VEGETABLE_PLOT) seasonal variants ---
+        self._seasonal_color_cache[(WHEAT_FIELD, "spring")] = (150, 165, 60)
+        self._seasonal_color_cache[(WHEAT_FIELD, "summer")] = (190, 175, 65)
+        self._seasonal_color_cache[(WHEAT_FIELD, "autumn")] = (200, 180, 70)
+        self._seasonal_color_cache[(WHEAT_FIELD, "winter")] = (140, 135, 110)
+        self._seasonal_color_cache[(VEGETABLE_PLOT, "spring")] = (75, 170, 60)
+        self._seasonal_color_cache[(VEGETABLE_PLOT, "summer")] = (70, 155, 55)
+        self._seasonal_color_cache[(VEGETABLE_PLOT, "autumn")] = (100, 130, 50)
+        self._seasonal_color_cache[(VEGETABLE_PLOT, "winter")] = (130, 130, 110)
+        self._seasonal_color_cache[(TILLED_SOIL, "spring")] = (105, 90, 55)
+        self._seasonal_color_cache[(TILLED_SOIL, "summer")] = (100, 85, 50)
+        self._seasonal_color_cache[(TILLED_SOIL, "autumn")] = (110, 95, 60)
+        self._seasonal_color_cache[(TILLED_SOIL, "winter")] = (130, 120, 100)
         self._seasonal_color_cache[(FLOWER_BED, "winter")] = (160, 155, 145)
 
     def _build_seasonal_tile_cache(self, season: str):
@@ -1089,6 +465,42 @@ class Renderer:
         # Clear the dimmed cache so it picks up new seasonal tiles
         if hasattr(self, '_dimmed_cache'):
             self._dimmed_cache = {}
+
+    def set_vegetation_systems(self, vegetation_sys, crop_system):
+        """Bind vegetation and crop systems for color overrides."""
+        self._vegetation_sys = vegetation_sys
+        self._crop_system = crop_system
+
+    def _get_vegetation_color(self, x: int, y: int):
+        """Return a color override tuple from vegetation or crop systems.
+
+        Crop system overrides take priority, then vegetation overrides.
+        Returns None if no override exists.
+        """
+        if self._crop_system is not None:
+            c = self._crop_system.color_overrides.get((x, y))
+            if c is not None:
+                return c
+        if self._vegetation_sys is not None:
+            c = self._vegetation_sys.color_overrides.get((x, y))
+            if c is not None:
+                return c
+        return None
+
+    def _get_veg_tint(self, color: tuple) -> pygame.Surface:
+        """Return a cached SRCALPHA tint surface for vegetation overlays.
+
+        Avoids creating a new Surface every frame for every visible tile.
+        """
+        if not hasattr(self, '_veg_tint_cache'):
+            self._veg_tint_cache: dict = {}
+        cached = self._veg_tint_cache.get(color)
+        if cached is not None:
+            return cached
+        tint = pygame.Surface((TILE_SIZE, TILE_SIZE), pygame.SRCALPHA)
+        tint.fill((*color, 120))
+        self._veg_tint_cache[color] = tint
+        return tint
 
     def _get_seasonal_tile(self, terrain_type: int) -> Optional[pygame.Surface]:
         """Get the seasonal variant of a tile, or None to use default."""
@@ -1336,6 +748,9 @@ class Renderer:
     def draw_world(self, world: World, camera: Camera, visible_tiles=None,
                    player=None):
         """Draw terrain tiles with FOV, roofs on unvisited buildings, 2.5D."""
+        # Advance water animation tick
+        self._water_anim_tick += 1
+
         # Build building function cache on first draw (for colored roofs, smoke, etc.)
         if not self._building_function_built:
             self._build_building_function_cache(world)
@@ -1373,8 +788,65 @@ class Renderer:
         if player_floor != 0 and player_building_rect:
             floor_y_offset = -player_floor * pixels_per_floor  # negative = up
 
+        # --- BATCH PRE-PASS for common terrain tiles ---
+        # When conditions are simple (ground floor, no building rect, no
+        # dim_exterior), batch-blit GRASS/FOREST/SAND/FARMLAND tiles via
+        # pygame blits() to reduce per-tile Python call overhead.
+        _batch_types = frozenset((GRASS, FOREST, SAND, FARMLAND))
+        _batch_blit_list = []  # list of (surface, (sx, sy))
+        _batched_coords = set()  # (x, y) tiles handled by batch pass
+
+        can_batch = (player_floor == 0 and not dim_exterior
+                     and not player_building_rect)
+        if can_batch:
+            cam_x_int = int(camera.x)
+            cam_y_int = int(camera.y)
+            for by in range(y0, y1):
+                for bx in range(x0, x1):
+                    # Only batch tiles that are in FOV (or FOV is disabled)
+                    if visible_tiles is not None and (bx, by) not in visible_tiles:
+                        continue
+                    # Skip tiles inside buildings (need roof logic)
+                    if (bx, by) in building_tiles:
+                        continue
+                    tile_type = world.tiles[by][bx]
+                    if tile_type not in _batch_types:
+                        continue
+                    # Use seasonal tile if available, else standard cache
+                    tile_surf = (self._get_seasonal_tile(tile_type)
+                                 or self._tile_cache.get(tile_type))
+                    if tile_surf:
+                        bsx = bx * TILE_SIZE - cam_x_int
+                        bsy = by * TILE_SIZE - cam_y_int
+                        _batch_blit_list.append((tile_surf, (bsx, bsy)))
+                        _batched_coords.add((bx, by))
+
+            if _batch_blit_list:
+                self.screen.blits(_batch_blit_list, doreturn=False)
+
         for y in range(y0, y1):
             for x in range(x0, x1):
+                # Skip tiles already handled by batch pre-pass
+                if (x, y) in _batched_coords:
+                    # Still need terrain blending and vegetation overlays
+                    tile_type = world.tiles[y][x]
+                    sx = x * TILE_SIZE - int(camera.x)
+                    sy = y * TILE_SIZE - int(camera.y)
+                    # Vegetation/crop color override tint (cached)
+                    override_color = self._get_vegetation_color(x, y)
+                    if override_color:
+                        tint = self._get_veg_tint(override_color)
+                        self.screen.blit(tint, (sx, sy))
+                    # Terrain edge blending
+                    if tile_type in (GRASS, SAND, FOREST, DENSE_FOREST, SNOW,
+                                     SWAMP, WATER, MOUNTAIN, FARMLAND,
+                                     ROCKY_GROUND, MARSH):
+                        try:
+                            self._blend_terrain_edge(world, x, y, sx, sy, tile_type)
+                        except Exception:
+                            pass
+                    continue
+
                 sx = x * TILE_SIZE - int(camera.x)
                 sy = y * TILE_SIZE - int(camera.y)
 
@@ -1429,10 +901,7 @@ class Renderer:
                         ground_tile = world.tiles[y][x]
                         gt_surf = self._tile_cache.get(ground_tile)
                         if gt_surf:
-                            dimmed_gt = gt_surf.copy()
-                            dark = pygame.Surface((TILE_SIZE, TILE_SIZE), pygame.SRCALPHA)
-                            dark.fill((0, 0, 0, 120))
-                            dimmed_gt.blit(dark, (0, 0))
+                            dimmed_gt = self._get_dimmed_tile(gt_surf, 120)
                             self.screen.blit(dimmed_gt, (sx, sy))
 
                         # Draw the current floor's tile at the elevated position
@@ -1458,19 +927,60 @@ class Renderer:
                         continue
 
                     # --- NORMAL TILE (with seasonal variant) ---
-                    tile_surf = self._get_seasonal_tile(tile_type) or self._tile_cache.get(tile_type)
+                    _is_water = False
+                    try:
+                        if tile_type == WATER:
+                            _is_water = True
+                            wclass = classify_water_tile(
+                                world.tiles, x, y, world.width, world.height)
+                            frame_idx = (self._water_anim_tick // 30 + x + y) % 3
+                            tile_surf = self._water_wave_frames.get(
+                                (wclass, frame_idx))
+                            if not tile_surf:
+                                tile_surf = self._water_base_variants.get(wclass)
+                        else:
+                            tile_surf = (self._get_seasonal_tile(tile_type)
+                                         or self._tile_cache.get(tile_type))
+                    except Exception:
+                        tile_surf = None
                     if tile_surf:
                         self.screen.blit(tile_surf, (sx, sy))
+                    else:
+                        # Fallback for tile types without a cached surface
+                        fallback_color = TERRAIN_COLORS.get(tile_type, (80, 80, 80))
+                        pygame.draw.rect(self.screen, fallback_color,
+                                         (sx, sy, TILE_SIZE, TILE_SIZE))
+
+                    # Shore foam overlay for water tiles
+                    if _is_water:
+                        land_mask = get_land_neighbor_mask(
+                            world.tiles, x, y, world.width, world.height)
+                        if land_mask:
+                            for bit in range(4):
+                                if land_mask & (1 << bit):
+                                    foam = self._shore_foam.get(
+                                        (bit, frame_idx))
+                                    if foam:
+                                        self.screen.blit(foam, (sx, sy))
+
+                    # Vegetation/crop color override tint (cached)
+                    override_color = self._get_vegetation_color(x, y)
+                    if override_color:
+                        tint = self._get_veg_tint(override_color)
+                        self.screen.blit(tint, (sx, sy))
 
                     # Dim exterior when on non-ground floor
                     if dim_exterior and not in_player_building:
-                        dim = pygame.Surface((TILE_SIZE, TILE_SIZE), pygame.SRCALPHA)
-                        dim.fill((0, 0, 0, 140))
-                        self.screen.blit(dim, (sx, sy))
+                        self.screen.blit(self._get_dim_overlay(140), (sx, sy))
 
-                    # Terrain edge blending
-                    if tile_type in (GRASS, SAND, FOREST, DENSE_FOREST, SNOW, SWAMP):
-                        self._blend_terrain_edge(world, x, y, sx, sy, tile_type)
+                    # Terrain edge blending for natural terrain types
+                    # (skip every other tile in a checkerboard to halve cost)
+                    if (tile_type in _NATURAL_BLEND_TYPES
+                            and (x + y) % 2 == (self._water_anim_tick // 60) % 2):
+                        try:
+                            self._blend_terrain_edge(world, x, y, sx, sy, tile_type)
+                        except Exception:
+                            pass  # blending is cosmetic, don't crash
 
                 elif explored:
                     # Underground: all explored surface tiles are black
@@ -1486,20 +996,16 @@ class Renderer:
                             self.screen.blit(roof, (sx, sy))
                             continue
 
-                    # Use cached dimmed tile surfaces
-                    if not hasattr(self, '_dimmed_cache'):
-                        self._dimmed_cache = {}
-                    if tile_type not in self._dimmed_cache:
-                        tile_surf = self._tile_cache.get(tile_type)
-                        if tile_surf:
-                            dimmed = tile_surf.copy()
-                            dark = pygame.Surface((TILE_SIZE, TILE_SIZE), pygame.SRCALPHA)
-                            dark.fill((0, 0, 0, 140))
-                            dimmed.blit(dark, (0, 0))
-                            self._dimmed_cache[tile_type] = dimmed
-                    dimmed = self._dimmed_cache.get(tile_type)
-                    if dimmed:
+                    tile_surf = self._tile_cache.get(tile_type)
+                    if tile_surf:
+                        dimmed = self._get_dimmed_tile(tile_surf, 140)
                         self.screen.blit(dimmed, (sx, sy))
+                    else:
+                        # Fallback for explored tile without cached surface
+                        fallback_color = TERRAIN_COLORS.get(tile_type, (80, 80, 80))
+                        fc = tuple(c // 2 for c in fallback_color)  # dimmed
+                        pygame.draw.rect(self.screen, fc,
+                                         (sx, sy, TILE_SIZE, TILE_SIZE))
                 else:
                     pygame.draw.rect(self.screen, (5, 5, 10),
                                     (sx, sy, TILE_SIZE, TILE_SIZE))
@@ -1611,8 +1117,12 @@ class Renderer:
                         # Gradient: darken bottom with a single overlay
                         if wall_h > 4:
                             grad_h = (draw_bot - draw_top) // 2
-                            grad_surf = pygame.Surface((TILE_SIZE, grad_h), pygame.SRCALPHA)
-                            grad_surf.fill((0, 0, 0, 30))
+                            gk_s = (TILE_SIZE, grad_h, 30)
+                            grad_surf = self._wall_grad_cache.get(gk_s)
+                            if grad_surf is None:
+                                grad_surf = pygame.Surface((TILE_SIZE, grad_h), pygame.SRCALPHA)
+                                grad_surf.fill((0, 0, 0, 30))
+                                self._wall_grad_cache[gk_s] = grad_surf
                             self.screen.blit(grad_surf, (sx, draw_bot - grad_h))
                         # A few accent brick lines (every 6px instead of every 3px)
                         brick_color = (max(0, wr - 18), max(0, wg - 18), max(0, wb - 15))
@@ -1641,8 +1151,12 @@ class Renderer:
                         # Darken bottom half
                         if wall_h > 4:
                             grad_h = (draw_bot_e - draw_top_e) // 2
-                            grad_surf = pygame.Surface((draw_w, grad_h), pygame.SRCALPHA)
-                            grad_surf.fill((0, 0, 0, 25))
+                            gk_e = (draw_w, grad_h, 25)
+                            grad_surf = self._wall_grad_cache.get(gk_e)
+                            if grad_surf is None:
+                                grad_surf = pygame.Surface((draw_w, grad_h), pygame.SRCALPHA)
+                                grad_surf.fill((0, 0, 0, 25))
+                                self._wall_grad_cache[gk_e] = grad_surf
                             self.screen.blit(grad_surf, (east_x, draw_bot_e - grad_h))
 
                 # --- FLAT ROOF TILE (drawn offset upward) ---
@@ -2025,14 +1539,20 @@ class Renderer:
     def _blend_terrain_edge(self, world, x: int, y: int, sx: int, sy: int,
                             tile_type: int):
         """Draw subtle edge blending where two natural terrain types meet.
-        Uses semi-transparent pixels along the tile edges for a softer look."""
+        Uses semi-transparent pixels along all 4 tile edges for a softer look."""
         if not hasattr(self, '_edge_cache'):
             self._edge_cache = {}
 
-        # Check 4 neighbors
-        neighbors = [(x + 1, y, "right"), (x, y + 1, "down")]
+        # Check all 4 neighbors
+        neighbors = [
+            (x + 1, y, "right"), (x - 1, y, "left"),
+            (x, y + 1, "down"), (x, y - 1, "up"),
+        ]
         natural = {GRASS, SAND, FOREST, DENSE_FOREST, SNOW, SWAMP, WATER,
                     MOUNTAIN, FARMLAND, ROCKY_GROUND, MARSH}
+
+        blend_start = TILE_SIZE * 2 // 3  # start blending at 2/3 of tile
+        blend_width = max(1, TILE_SIZE // 3)  # blend over last 1/3
 
         for nx, ny, direction in neighbors:
             if not (0 <= nx < world.width and 0 <= ny < world.height):
@@ -2048,17 +1568,29 @@ class Renderer:
                 n_color = TERRAIN_COLORS.get(neighbor_type, (80, 80, 80))
 
                 if direction == "right":
-                    # Blend right edge: neighbor color fades in from right
-                    for px in range(TILE_SIZE * 2 // 3, TILE_SIZE):
-                        alpha = int(((px - TILE_SIZE * 2 // 3) / (TILE_SIZE // 3)) * 80)
-                        # Dither pattern
+                    for px in range(blend_start, TILE_SIZE):
+                        alpha = int(((px - blend_start) / blend_width) * 80)
+                        for py in range(0, TILE_SIZE, 2):
+                            if (px + py) % 3 == 0:
+                                blend.set_at((px, py),
+                                             (n_color[0], n_color[1], n_color[2], alpha))
+                elif direction == "left":
+                    for px in range(0, TILE_SIZE - blend_start):
+                        alpha = int(((TILE_SIZE - blend_start - px) / blend_width) * 80)
                         for py in range(0, TILE_SIZE, 2):
                             if (px + py) % 3 == 0:
                                 blend.set_at((px, py),
                                              (n_color[0], n_color[1], n_color[2], alpha))
                 elif direction == "down":
-                    for py in range(TILE_SIZE * 2 // 3, TILE_SIZE):
-                        alpha = int(((py - TILE_SIZE * 2 // 3) / (TILE_SIZE // 3)) * 80)
+                    for py in range(blend_start, TILE_SIZE):
+                        alpha = int(((py - blend_start) / blend_width) * 80)
+                        for px in range(0, TILE_SIZE, 2):
+                            if (px + py) % 3 == 0:
+                                blend.set_at((px, py),
+                                             (n_color[0], n_color[1], n_color[2], alpha))
+                elif direction == "up":
+                    for py in range(0, TILE_SIZE - blend_start):
+                        alpha = int(((TILE_SIZE - blend_start - py) / blend_width) * 80)
                         for px in range(0, TILE_SIZE, 2):
                             if (px + py) % 3 == 0:
                                 blend.set_at((px, py),
@@ -2678,7 +2210,14 @@ class Renderer:
 
     def draw_npcs(self, npcs: list, camera: Camera, player: Player, visible_tiles=None):
         """Draw NPCs (only if in player's field of view)."""
+        # Distance culling: compute visible tile range with margin
+        vx0, vy0, vx1, vy1 = camera.get_visible_tile_range()
+        cull_margin = 5
         for npc in npcs:
+            # Early tile-range cull before expensive world_to_screen
+            if (npc.x < vx0 - cull_margin or npc.x > vx1 + cull_margin or
+                    npc.y < vy0 - cull_margin or npc.y > vy1 + cull_margin):
+                continue
             # FOV check
             if visible_tiles and (int(npc.x), int(npc.y)) not in visible_tiles:
                 continue
@@ -2701,8 +2240,6 @@ class Renderer:
             # Consciousness glow (cached surfaces)
             if npc.consciousness > 0:
                 cache_key = npc.consciousness
-                if not hasattr(self, '_consciousness_glow_cache'):
-                    self._consciousness_glow_cache = {}
                 glow_surf = self._consciousness_glow_cache.get(cache_key)
                 if glow_surf is None:
                     glow_color = CONSCIOUSNESS_COLORS.get(cache_key, (140, 140, 200))
@@ -2714,101 +2251,160 @@ class Renderer:
                 self.screen.blit(glow_surf, (int(sx) - gr, int(sy) - bh // 2 - gr // 2))
 
             # Quest marker
-            if npc.has_quest_marker and npc.quest and not npc.quest.turned_in:
+            if SHOW_QUEST_MARKERS and npc.has_quest_marker and npc.quest and not npc.quest.turned_in:
                 marker_color = YELLOW if not npc.quest.completed else GREEN
                 qy = int(sy) - bh // 2 - s * 3
                 pygame.draw.polygon(self.screen, marker_color, [
                     (int(sx), qy), (int(sx) - s, qy + s * 2), (int(sx) + s, qy + s * 2)])
                 pygame.draw.circle(self.screen, marker_color, (int(sx), qy - max(1, s // 2)), max(1, s // 2))
 
-            # Name (when close)
             dist = player.dist_to(npc)
-            if dist < 6:
-                name_surf = self.font_sm.render(npc.name, True, WHITE)
+
+            # Name (when close)
+            if SHOW_NPC_NAMES and dist < 6:
+                cached = getattr(npc, '_name_surf', None)
+                if cached is None or getattr(npc, '_name_surf_key', None) != npc.name:
+                    npc._name_surf = self.font_sm.render(npc.name, True, WHITE)
+                    npc._name_surf_key = npc.name
+                name_surf = npc._name_surf
                 self.screen.blit(name_surf,
                                 (int(sx) - name_surf.get_width() // 2, int(sy) - bh // 2 - s * 2))
 
-            # Action indicator
-            action_icons = self._action_icons
-            act = getattr(npc, 'current_action', npc.state)
-            if act in action_icons:
-                label, color = action_icons[act]
-                act_surf = self.font_sm.render(label, True, color)
-                self.screen.blit(act_surf, (int(sx) + 10, int(sy) - 24))
+                # Rich NPCs: gold-tinted name (overwrites white)
+                npc_gold = getattr(npc, 'npc_gold', 0)
+                if npc_gold > 100:
+                    gold_key = (npc.name, 'gold')
+                    name_surf = self._name_surf_cache.get(gold_key)
+                    if name_surf is None:
+                        name_surf = self.font_sm.render(npc.name, True, (255, 215, 80))
+                        self._name_surf_cache[gold_key] = name_surf
+                    self.screen.blit(name_surf,
+                                    (int(sx) - name_surf.get_width() // 2, int(sy) - bh // 2 - s * 2))
 
-            # Cargo indicator — small colored square above head when carrying goods
-            _ws = getattr(npc, '_work_state', None)
-            if _ws and getattr(_ws, 'carrying', None):
-                cargo_item = _ws.carrying.get("item", "")
-                cargo_colors = {
-                    "food": (200, 180, 80), "ore": (160, 140, 120),
-                    "wood": (140, 100, 50), "weapons": (180, 180, 200),
-                    "tools": (160, 160, 140), "stone": (140, 140, 140),
-                    "clothing": (180, 120, 160), "gold": (220, 200, 60),
-                }
-                cargo_labels = {
-                    "food": "F", "ore": "O", "wood": "W",
-                    "weapons": "X", "tools": "T", "stone": "S",
-                    "clothing": "C", "gold": "G",
-                }
-                cc = cargo_colors.get(cargo_item, (180, 160, 100))
-                cl = cargo_labels.get(cargo_item, "?")
-                # Draw small filled square with letter
-                cx_pos, cy_pos = int(sx), int(sy) - bh // 2 - s * 3
-                pygame.draw.rect(self.screen, cc,
-                                 (cx_pos - 4, cy_pos - 4, 8, 8))
-                pygame.draw.rect(self.screen, (40, 40, 40),
-                                 (cx_pos - 4, cy_pos - 4, 8, 8), 1)
-                cargo_surf = self.font_sm.render(cl, True, (40, 40, 40))
-                self.screen.blit(cargo_surf,
-                                 (cx_pos - cargo_surf.get_width() // 2,
-                                  cy_pos - cargo_surf.get_height() // 2))
+            # Action label
+            if SHOW_NPC_ACTIONS:
+                action_icons = self._action_icons
+                act = getattr(npc, 'current_action', npc.state)
+                if act in action_icons:
+                    label, color = action_icons[act]
+                    act_surf = self._action_surf_cache.get(act)
+                    if act_surf is None:
+                        act_surf = self.font_sm.render(label, True, color)
+                        self._action_surf_cache[act] = act_surf
+                    self.screen.blit(act_surf, (int(sx) + 10, int(sy) - 24))
 
-            # Speech bubble for NPCs wanting to talk or approaching player
-            if getattr(npc, 'wants_to_talk', False) or getattr(npc, 'current_action', '') == 'approaching_player':
-                pygame.draw.ellipse(self.screen, WHITE, (int(sx) - 10, int(sy) - 40, 20, 14))
-                pygame.draw.ellipse(self.screen, DARK_GRAY, (int(sx) - 10, int(sy) - 40, 20, 14), 1)
-                bang = self.font_sm.render("!", True, RED)
-                self.screen.blit(bang, (int(sx) - 3, int(sy) - 39))
+            # Cargo indicator
+            if SHOW_NPC_CARGO:
+                _ws = getattr(npc, '_work_state', None)
+                if _ws and getattr(_ws, 'carrying', None):
+                    cargo_item = _ws.carrying.get("item", "")
+                    cargo_colors = {
+                        "food": (200, 180, 80), "ore": (160, 140, 120),
+                        "wood": (140, 100, 50), "weapons": (180, 180, 200),
+                        "tools": (160, 160, 140), "stone": (140, 140, 140),
+                        "clothing": (180, 120, 160), "gold": (220, 200, 60),
+                    }
+                    cargo_labels = {
+                        "food": "F", "ore": "O", "wood": "W",
+                        "weapons": "X", "tools": "T", "stone": "S",
+                        "clothing": "C", "gold": "G",
+                    }
+                    cc = cargo_colors.get(cargo_item, (180, 160, 100))
+                    cl = cargo_labels.get(cargo_item, "?")
+                    cx_pos, cy_pos = int(sx), int(sy) - bh // 2 - s * 3
+                    pygame.draw.rect(self.screen, cc,
+                                     (cx_pos - 4, cy_pos - 4, 8, 8))
+                    pygame.draw.rect(self.screen, (40, 40, 40),
+                                     (cx_pos - 4, cy_pos - 4, 8, 8), 1)
+                    cargo_surf = self.font_sm.render(cl, True, (40, 40, 40))
+                    self.screen.blit(cargo_surf,
+                                     (cx_pos - cargo_surf.get_width() // 2,
+                                      cy_pos - cargo_surf.get_height() // 2))
 
-            # Rich NPCs: gold-tinted name
-            npc_gold = getattr(npc, 'npc_gold', 0)
-            if npc_gold > 100 and dist < 6:
-                # Re-draw name with gold tint (overwrites the white name drawn above)
-                name_surf = self.font_sm.render(npc.name, True, (255, 215, 80))
-                self.screen.blit(name_surf,
-                                (int(sx) - name_surf.get_width() // 2, int(sy) - bh // 2 - s * 2))
+            # Speech bubble
+            if SHOW_SPEECH_BUBBLES:
+                if getattr(npc, 'wants_to_talk', False) or getattr(npc, 'current_action', '') == 'approaching_player':
+                    pygame.draw.ellipse(self.screen, WHITE, (int(sx) - 10, int(sy) - 40, 20, 14))
+                    pygame.draw.ellipse(self.screen, DARK_GRAY, (int(sx) - 10, int(sy) - 40, 20, 14), 1)
+                    bang = self.font_sm.render("!", True, RED)
+                    self.screen.blit(bang, (int(sx) - 3, int(sy) - 39))
 
-            # Party indicator
-            if getattr(npc, 'party_id', None):
-                party_color = (100, 200, 255) if getattr(npc, 'party_role', '') == 'leader' else (80, 160, 200)
-                pygame.draw.circle(self.screen, party_color, (int(sx) + 10, int(sy) - 16), 3)
+            # NPC-NPC conversation indicator (speech bubble + partner line)
+            if SHOW_NPC_CONVERSATIONS:
+                _npc_act = getattr(npc, 'current_action', '')
+                _npc_state = getattr(npc, 'state', '')
+                if _npc_act == 'talking' or _npc_state == 'socializing':
+                    # Draw small speech bubble with "..."
+                    bub_x, bub_y = int(sx) + 12, int(sy) - 36
+                    pygame.draw.ellipse(self.screen, (240, 240, 220),
+                                        (bub_x - 12, bub_y - 6, 24, 14))
+                    pygame.draw.ellipse(self.screen, (100, 100, 80),
+                                        (bub_x - 12, bub_y - 6, 24, 14), 1)
+                    dots = self.font_sm.render("...", True, (80, 80, 60))
+                    self.screen.blit(dots, (bub_x - dots.get_width() // 2,
+                                            bub_y - dots.get_height() // 2))
 
-            # Mood indicator (small colored dot) and emotion icons
-            npc_mood = getattr(npc, 'mood', 0)
-            if abs(npc_mood) > 0.2 and dist < 6:
-                mood_color = (50, 200, 50) if npc_mood > 0 else (200, 80, 50)
-                pygame.draw.circle(self.screen, mood_color, (int(sx) - 10, int(sy) - 16), 3)
+            # Status overlays (mood, emotions, traits, needs, party)
+            if SHOW_NPC_STATUS:
+                if getattr(npc, 'party_id', None):
+                    party_color = (100, 200, 255) if getattr(npc, 'party_role', '') == 'leader' else (80, 160, 200)
+                    pygame.draw.circle(self.screen, party_color, (int(sx) + 10, int(sy) - 16), 3)
 
-            # Emotion/interaction icons above head (when close enough to see)
-            if dist < 8:
-                self._draw_npc_emotion_icon(npc, sx, sy, bh, s)
+                npc_mood = getattr(npc, 'mood', 0)
+                if abs(npc_mood) > 0.2 and dist < 6:
+                    mood_color = (50, 200, 50) if npc_mood > 0 else (200, 80, 50)
+                    pygame.draw.circle(self.screen, mood_color, (int(sx) - 10, int(sy) - 16), 3)
 
-            # Social trait hint when very close
-            if dist < 3:
-                traits = getattr(npc, 'social_traits', [])
-                if traits:
-                    trait_text = self.font_sm.render(", ".join(traits[:2]), True, (140, 140, 160))
-                    self.screen.blit(trait_text, (int(sx) - trait_text.get_width() // 2, int(sy) + 18))
+                if dist < 8:
+                    self._draw_npc_emotion_icon(npc, sx, sy, bh, s)
 
-            # Need bars (only when close and needs are low)
-            if dist < 8:
-                self._draw_npc_needs(npc, int(sx), int(sy))
+                if dist < 3:
+                    traits = getattr(npc, 'social_traits', [])
+                    if traits:
+                        trait_text = self.font_sm.render(", ".join(traits[:2]), True, (140, 140, 160))
+                        self.screen.blit(trait_text, (int(sx) - trait_text.get_width() // 2, int(sy) + 18))
+
+                if dist < 8:
+                    self._draw_npc_needs(npc, int(sx), int(sy))
+
+    def draw_conversation_lines(self, conversations, camera: Camera,
+                                visible_tiles=None):
+        """Draw faint lines between NPCs that are currently in conversation."""
+        for conv in conversations:
+            n1, n2 = conv.npc1, conv.npc2
+            if not (n1.alive and n2.alive):
+                continue
+            # Both must be on screen
+            s1x, s1y = camera.world_to_screen(n1.x, n1.y)
+            s2x, s2y = camera.world_to_screen(n2.x, n2.y)
+            on1 = -TILE_SIZE < s1x < SCREEN_WIDTH + TILE_SIZE and \
+                   -TILE_SIZE < s1y < SCREEN_HEIGHT + TILE_SIZE
+            on2 = -TILE_SIZE < s2x < SCREEN_WIDTH + TILE_SIZE and \
+                   -TILE_SIZE < s2y < SCREEN_HEIGHT + TILE_SIZE
+            if not (on1 and on2):
+                continue
+            # FOV check
+            if visible_tiles:
+                if ((int(n1.x), int(n1.y)) not in visible_tiles or
+                        (int(n2.x), int(n2.y)) not in visible_tiles):
+                    continue
+            # Draw faint line (muted color to appear subtle)
+            pygame.draw.line(self.screen, (140, 140, 80),
+                             (int(s1x), int(s1y) - 10),
+                             (int(s2x), int(s2y) - 10), 1)
 
     def draw_creatures(self, creatures: list, camera: Camera, visible_tiles=None):
         """Draw creatures (only if in player's field of view)."""
+        # Distance culling: compute visible tile range with margin
+        vx0, vy0, vx1, vy1 = camera.get_visible_tile_range()
+        cull_margin = 5
         for creature in creatures:
             if not creature.alive:
+                continue
+
+            # Early tile-range cull before expensive world_to_screen
+            if (creature.x < vx0 - cull_margin or creature.x > vx1 + cull_margin or
+                    creature.y < vy0 - cull_margin or creature.y > vy1 + cull_margin):
                 continue
 
             # FOV check
@@ -2824,6 +2420,16 @@ class Renderer:
             s = max(1, TILE_SIZE // 4)
             update_anim(creature, getattr(self, '_last_dt', 0.016))
             draw_creature_body(self.screen, creature, int(sx), int(sy), s)
+
+            # Speech bubble for intelligent creatures that want to talk
+            if SHOW_SPEECH_BUBBLES and getattr(creature, 'wants_to_talk', False):
+                bh = s * 5
+                pygame.draw.ellipse(self.screen, WHITE,
+                                    (int(sx) - 10, int(sy) - bh // 2 - 18, 20, 14))
+                pygame.draw.ellipse(self.screen, DARK_GRAY,
+                                    (int(sx) - 10, int(sy) - bh // 2 - 18, 20, 14), 1)
+                bang = self.font_sm.render("!", True, RED)
+                self.screen.blit(bang, (int(sx) - 3, int(sy) - bh // 2 - 17))
 
     def _draw_npc_needs(self, npc, sx: int, sy: int):
         """Draw small need indicators above NPC when they're low."""
@@ -3023,59 +2629,92 @@ class Renderer:
                 self.screen.blit(flash_surf, (int(sx) - size * 2, int(sy) - size * 2))
 
     def draw_night_overlay(self, darkness: float):
-        """Legacy wrapper — delegates to draw_lighting for full day/night."""
-        # Called from main._draw with darkness from TimeSystem.
-        # We still support the old call signature for backward compat.
+        """Legacy wrapper — converts darkness to normalized time, delegates to draw_lighting."""
         if darkness <= 0:
             return
-        # Use the new lighting method with the darkness value
-        self._draw_night_lighting(darkness)
+        # Approximate a normalized time from darkness for smooth transitions
+        if darkness >= 0.99:
+            approx_time = 0.0  # midnight
+        elif darkness > 0:
+            approx_time = 0.75 + darkness * 0.083
+        else:
+            approx_time = 0.5  # noon
+        self.draw_lighting(approx_time)
 
     def draw_lighting(self, game_time_normalized: float, camera=None, world=None):
-        """Draw smooth day/night lighting overlay.
+        """Draw smooth day/night lighting overlay with gradual transitions.
 
         game_time_normalized: 0.0-1.0 fraction of day (from TimeSystem.normalized).
         camera / world: used for finding light-source tiles on screen.
 
         Lighting phases (24-hour equivalents):
-          Dawn  (5:00-7:00):  orange-to-yellow brightening
-          Day   (7:00-17:00): no overlay (full brightness)
-          Dusk  (17:00-19:00): orange-to-blue darkening
-          Night (19:00-5:00):  dark blue overlay ~60% darkness
+          Dawn     (5:00-7:00):  warm orange tint, fading to clear
+          Midday   (10:00-14:00): full brightness, no overlay
+          Afternoon(7:00-10:00 & 14:00-17:00): very slight warm tint
+          Dusk     (17:00-19:00): warm amber/pink tint, darkening
+          Evening  (19:00-21:00): blue-grey overlay, gradually darkening
+          Night    (21:00-5:00):  dark blue overlay
         """
         t = game_time_normalized  # 0.0 - 1.0
 
         # Convert to 24-hour fractions
-        dawn_start = 5.0 / 24.0    # 0.2083
-        dawn_end   = 7.0 / 24.0    # 0.2917
-        dusk_start = 17.0 / 24.0   # 0.7083
-        dusk_end   = 19.0 / 24.0   # 0.7917
+        dawn_start  = 5.0 / 24.0    # 0.2083
+        dawn_end    = 7.0 / 24.0    # 0.2917
+        morning_end = 10.0 / 24.0   # 0.4167
+        afternoon   = 14.0 / 24.0   # 0.5833
+        dusk_start  = 17.0 / 24.0   # 0.7083
+        dusk_end    = 19.0 / 24.0   # 0.7917
+        evening_end = 21.0 / 24.0   # 0.875
 
-        if dawn_end <= t < dusk_start:
-            # Full daylight — no overlay
+        if morning_end <= t < afternoon:
+            # Peak midday — full brightness, no overlay
             return
 
-        if dawn_start <= t < dawn_end:
-            # Dawn transition — orange to yellow brightening
+        if dawn_end <= t < morning_end:
+            # Early morning — very faint warm tint fading out
+            progress = (t - dawn_end) / (morning_end - dawn_end)
+            alpha = int(20 * (1.0 - progress))
+            if alpha <= 2:
+                return
+            overlay_color = (180, 140, 60, alpha)
+        elif afternoon <= t < dusk_start:
+            # Late afternoon — very faint warm tint building up
+            progress = (t - afternoon) / (dusk_start - afternoon)
+            alpha = int(18 * progress)
+            if alpha <= 2:
+                return
+            overlay_color = (180, 130, 50, alpha)
+        elif dawn_start <= t < dawn_end:
+            # Dawn transition — warm orange tint fading to clear
             progress = (t - dawn_start) / (dawn_end - dawn_start)
-            # Blend from dark-blue night to orange dawn to clear
-            alpha = int(150 * (1.0 - progress))
-            # Orange at start, fading toward yellow
-            r_c = int(40 + 180 * (1.0 - progress))   # orange -> lighter
-            g_c = int(20 + 100 * progress)
-            b_c = int(60 * (1.0 - progress))
+            # Strong orange at start, fading out by dawn_end
+            alpha = int(50 * (1.0 - progress) + 120 * max(0, 0.5 - progress))
+            alpha = max(0, min(alpha, 110))
+            # Warm orange-gold tint
+            r_c = int(220 * (1.0 - progress * 0.6))
+            g_c = int(140 * (1.0 - progress * 0.4))
+            b_c = int(40 * (1.0 - progress))
             overlay_color = (r_c, g_c, b_c, alpha)
         elif dusk_start <= t < dusk_end:
-            # Dusk transition — orange to blue darkening
+            # Dusk transition — warm amber/pink, darkening toward evening
             progress = (t - dusk_start) / (dusk_end - dusk_start)
-            alpha = int(150 * progress)
-            # Orange at start, blue at end
-            r_c = int(180 * (1.0 - progress) + 10 * progress)
-            g_c = int(100 * (1.0 - progress) + 10 * progress)
-            b_c = int(20 * (1.0 - progress) + 60 * progress)
+            alpha = int(30 + 90 * progress)
+            # Amber at start, shifting to deeper pink/purple at end
+            r_c = int(200 * (1.0 - progress * 0.7) + 40 * progress)
+            g_c = int(110 * (1.0 - progress * 0.8))
+            b_c = int(50 + 40 * progress)
+            overlay_color = (r_c, g_c, b_c, alpha)
+        elif dusk_end <= t < evening_end:
+            # Evening — deepening blue-grey, transitioning to night
+            progress = (t - dusk_end) / (evening_end - dusk_end)
+            alpha = int(120 + 30 * progress)
+            # Blue-grey shifting to dark blue
+            r_c = int(40 * (1.0 - progress) + 10 * progress)
+            g_c = int(25 * (1.0 - progress) + 10 * progress)
+            b_c = int(70 * (1.0 - progress) + 50 * progress)
             overlay_color = (r_c, g_c, b_c, alpha)
         else:
-            # Night — dark blue with ~60% darkness (alpha ~150)
+            # Night — dark blue overlay
             alpha = 150
             overlay_color = (10, 10, 50, alpha)
 
@@ -3117,13 +2756,20 @@ class Renderer:
 
     def _punch_light_sources(self, camera, world, overlay_color, alpha):
         """Cut warm light circles on the night overlay for fire/torch tiles
-        and building windows (taverns, homes at night)."""
+        and building windows (taverns, homes at night).
+
+        Dynamic flickering: each light source randomly varies its radius
+        by +/- 0.5 tiles (8px) and its alpha by +/- 10 each frame,
+        creating a convincing firelight effect.
+        """
         x0, y0, x1, y1 = camera.get_visible_tile_range()
         light_tiles = (FIREPLACE, FORGE_FIRE)
-        # Window tiles in buildings glow dimly
         window_tile = WINDOW
 
         oc_r, oc_g, oc_b = overlay_color[0], overlay_color[1], overlay_color[2]
+
+        # Collect light sources for additive glow pass
+        fire_lights = []
 
         for y in range(y0, y1):
             for x in range(x0, x1):
@@ -3133,33 +2779,61 @@ class Renderer:
                 if tile in light_tiles:
                     sx = x * TILE_SIZE - int(camera.x) + TILE_SIZE // 2
                     sy = y * TILE_SIZE - int(camera.y) + TILE_SIZE // 2
-                    if -60 < sx < SCREEN_WIDTH + 60 and -60 < sy < SCREEN_HEIGHT + 60:
-                        # Warm light circle — radius ~48px (3 tiles)
-                        light_r = 48
+                    if -80 < sx < SCREEN_WIDTH + 80 and -80 < sy < SCREEN_HEIGHT + 80:
+                        # Flickering: vary radius by +/- 8px, alpha by +/- 10
+                        flicker_r = random.randint(-8, 8)
+                        flicker_a = random.randint(-10, 10)
+                        # FORGE_FIRE burns brighter and wider
+                        base_radius = 64 if tile == FORGE_FIRE else 56
+                        light_r = max(24, base_radius + flicker_r)
+                        adj_alpha = max(0, min(alpha, alpha + flicker_a))
+
+                        # Punch through darkness overlay (radial gradient)
                         for rad in range(light_r, 0, -3):
                             frac = rad / light_r
-                            # Blend toward warm orange at center
                             warm_r = int(oc_r * frac + 30 * (1 - frac))
                             warm_g = int(oc_g * frac + 15 * (1 - frac))
                             warm_b = int(oc_b * frac + 5 * (1 - frac))
-                            a = int(alpha * frac ** 0.6)
+                            a = int(adj_alpha * frac ** 0.6)
                             pygame.draw.circle(self.night_surface,
                                                (warm_r, warm_g, warm_b, a),
                                                (sx, sy), rad)
+
+                        # Store for additive glow pass
+                        fire_lights.append((sx, sy, light_r, adj_alpha, tile))
+
                 elif tile == window_tile:
-                    # Check if this window is in a building (tavern, home)
                     bfunc = self._building_function_cache.get((x, y), "")
                     if bfunc:
                         sx = x * TILE_SIZE - int(camera.x) + TILE_SIZE // 2
                         sy = y * TILE_SIZE - int(camera.y) + TILE_SIZE // 2
                         if -30 < sx < SCREEN_WIDTH + 30 and -30 < sy < SCREEN_HEIGHT + 30:
-                            # Smaller warm glow for windows
                             for rad in range(24, 0, -3):
                                 frac = rad / 24.0
                                 a = int(alpha * frac ** 0.8 * 0.6)
                                 pygame.draw.circle(self.night_surface,
                                                    (oc_r, oc_g, oc_b, a),
                                                    (sx, sy), rad)
+
+        # Additive glow pass — warm orange circles blitted on top of screen
+        # This makes fire sources visibly brighten the scene, not just cut darkness
+        for sx, sy, light_r, adj_alpha, tile in fire_lights:
+            glow_radius = light_r + 8
+            glow_size = glow_radius * 2
+            glow = pygame.Surface((glow_size, glow_size), pygame.SRCALPHA)
+            # Radial gradient: warm orange at center fading to transparent
+            glow_alpha_scale = min(1.0, adj_alpha / 100.0)
+            for r in range(glow_radius, 0, -3):
+                frac = r / glow_radius
+                ga = int(35 * frac * glow_alpha_scale)
+                # Forge fires are slightly more orange-white
+                if tile == FORGE_FIRE:
+                    gc = (255, 210, 120, ga)
+                else:
+                    gc = (255, 190, 90, ga)
+                pygame.draw.circle(glow, gc, (glow_radius, glow_radius), r)
+            self.screen.blit(glow, (sx - glow_radius, sy - glow_radius),
+                             special_flags=pygame.BLEND_ADD)
 
     def draw_minimap(self, world: World, player: Player, npcs: list, creatures: list,
                      show_minimap: bool = False):
@@ -3905,6 +3579,85 @@ class Renderer:
                 "life": random.uniform(0.2, 0.5),
                 "max_life": 0.5,
             })
+
+    # ================================================================
+    # CONSTRUCTION SCAFFOLDING — overlay for buildings under construction
+    # ================================================================
+
+    def draw_construction_scaffolding(self, construction_sys, camera):
+        """Draw scaffolding overlay and progress text for active construction projects.
+
+        Renders a semi-transparent brown cross-hatch pattern on tiles where
+        construction is in progress, plus a floating progress percentage.
+        """
+        if construction_sys is None:
+            return
+
+        # Tile-level projects (roads, houses, walls)
+        for project in construction_sys.projects:
+            if project.completed:
+                continue
+            px, py = project.x, project.y
+            sx = px * TILE_SIZE - int(camera.x)
+            sy = py * TILE_SIZE - int(camera.y)
+
+            # Determine build footprint based on project kind
+            if project.kind == "wooden_house":
+                w, h = 5, 4
+            elif project.kind == "new_settlement":
+                w, h = 8, 8
+            else:
+                w, h = 1, 1
+
+            # Check if any part is visible on screen
+            ex = sx + w * TILE_SIZE
+            ey = sy + h * TILE_SIZE
+            if ex < -TILE_SIZE or sx > SCREEN_WIDTH + TILE_SIZE:
+                continue
+            if ey < -TILE_SIZE or sy > SCREEN_HEIGHT + TILE_SIZE:
+                continue
+
+            # Draw scaffolding overlay on each tile in the footprint
+            for dy in range(h):
+                for dx in range(w):
+                    tx = sx + dx * TILE_SIZE
+                    ty = sy + dy * TILE_SIZE
+                    if tx < -TILE_SIZE or tx > SCREEN_WIDTH:
+                        continue
+                    if ty < -TILE_SIZE or ty > SCREEN_HEIGHT:
+                        continue
+                    self._draw_scaffolding_tile(tx, ty)
+
+            # Progress percentage floating above the construction
+            pct = int(project.progress * 100)
+            cx = sx + (w * TILE_SIZE) // 2
+            cy = sy - 8
+            pct_text = f"{pct}%"
+            color = (255, 220, 100) if pct < 100 else (100, 255, 100)
+            txt_surf = self.font_sm.render(pct_text, True, color)
+            tw = txt_surf.get_width()
+            # Background for readability
+            bg = pygame.Surface((tw + 6, 14), pygame.SRCALPHA)
+            bg.fill((30, 20, 10, 180))
+            self.screen.blit(bg, (cx - tw // 2 - 3, cy - 1))
+            self.screen.blit(txt_surf, (cx - tw // 2, cy))
+
+    def _draw_scaffolding_tile(self, sx, sy):
+        """Draw a brown cross-hatch scaffolding pattern on a single tile."""
+        ts = TILE_SIZE
+        # Semi-transparent brown overlay
+        overlay = pygame.Surface((ts, ts), pygame.SRCALPHA)
+        overlay.fill((120, 80, 40, 50))
+        # Cross-hatch lines (brown wooden frame)
+        line_color = (140, 95, 50, 140)
+        # Diagonal lines
+        pygame.draw.line(overlay, line_color, (0, 0), (ts - 1, ts - 1), 1)
+        pygame.draw.line(overlay, line_color, (ts - 1, 0), (0, ts - 1), 1)
+        # Border frame
+        pygame.draw.rect(overlay, (100, 70, 35, 120), (0, 0, ts, ts), 1)
+        # Horizontal brace at midpoint
+        pygame.draw.line(overlay, line_color, (0, ts // 2), (ts - 1, ts // 2), 1)
+        self.screen.blit(overlay, (sx, sy))
 
     # ================================================================
     # SETTLEMENT OVERLAY EFFECTS — walls, awnings, farm patterns

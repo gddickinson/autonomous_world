@@ -14,8 +14,12 @@ python play.py
 | Key | Action |
 |-----|--------|
 | WASD | Move |
-| E | Interact / Talk |
-| Space | Attack |
+| E | Interact / Talk (NPCs and intelligent monsters) |
+| Space | Melee attack (nearest hostile in facing direction) |
+| Left-click | Target entity (set as combat target / cast spell at) |
+| Right-click | Cancel targeting / deselect target |
+| 1-9 | Cast spell (enters targeting mode, click to aim) |
+| S | Toggle spell list overlay |
 | I | Inventory |
 | C | Character sheet |
 | Q | Quest log |
@@ -25,10 +29,10 @@ python play.py
 | Tab | Cycle nearby NPCs |
 | T | Free-text chat (in dialog) |
 | H | Historical chronicles |
-| V | Planet view |
-| ~ | Python console (god mode) |
+| V | Toggle view mode (Strategy → Adventure → 3D) |
+| F6 | Toggle entity overlays (All → Minimal → Off) |
 | F12 | Screenshot |
-| Escape | Pause menu |
+| Escape | Pause menu / cancel targeting |
 
 ## Core Systems
 
@@ -81,7 +85,15 @@ NPCs have the same rich interactions with each other as with the player:
 - **Body part damage** — 6 body parts, 8 damage types, wound tracking
 - **Equipment** — Weapons, armor, potions with durability
 - **Tactical combat** — Real-time with target selection and party management
-- **Siege warfare** — Lanchester combat model, siege engines, multi-army battles
+- **Siege warfare** — Lanchester combat model, siege engines (battering ram, catapult, trebuchet, siege tower), multi-army battles
+- **16 military unit types** — Infantry, archers, cavalry, siege engineers with rock-paper-scissors matchups
+- **5 formations** — Shield wall, wedge, skirmish line, siege formation, defensive circle
+
+### Intelligent Monster Societies
+- **Monster governance** — Orcs, goblins, kobolds, gnolls, bandits, undead each have governance models
+- **Monster dialog** — Orcs demand tribute, goblins offer trades, bandits toll roads, gnolls threaten
+- **Creature approach** — Intelligent monsters will approach and initiate conversation
+- **Monster settlements** — Orc strongholds, goblin warrens, kobold mines, undead crypts with populations
 
 ### World
 - **10,000 x 10,000 tile world** (chunked) with procedural terrain
@@ -140,7 +152,15 @@ game/
     children.py        — Reproduction and inheritance
     ...                — 40+ more subsystem files
   ui/
-    renderer.py        — Tile-based rendering with particles
+    renderer.py        — Strategy view (16px) with particles
+    renderer_adventure.py — Adventure view (32px, 2.5D)
+    renderer_3d.py     — 3D OpenGL view
+    character_anim.py  — Procedural NPC body parts and animation
+    player_anim.py     — Player rendering (mortal/ghost/god)
+    creatures/         — Per-type creature sprite templates (13 templates, 70 types)
+    poses.py           — Entity pose system (7 action poses)
+    mount_render.py    — Mounted entity rendering
+    object_sprites.py  — Siege engines, vehicles, fortifications
     panels.py          — Dialog, shop, inventory, quest UI
     god_mode.py        — Developer tools
   world/
@@ -159,6 +179,27 @@ Start in god mode for development/testing:
 - Live Python console (~) for executing code against game state
 - Parameter tweaker for adjusting settings in real-time
 - Hot reload for modifying game modules without restart
+
+## Visual Test Viewers
+
+The `viewers/` directory contains standalone test viewers for inspecting all visual elements:
+
+| Viewer | Command | What it shows |
+|--------|---------|---------------|
+| NPC Characters | `python viewers/test_character_anim.py` | All NPC classes/races in all view scales |
+| Creatures (2D) | `python viewers/test_creature_viewer.py` | All 65+ creature types with animation |
+| Creatures (3D) | `python viewers/test_creature_3d_viewer.py` | 3D creature templates |
+| Player | `python viewers/test_player_viewer.py` | Mortal/ghost/god modes |
+| Poses (2D) | `python viewers/test_poses_viewer.py` | All 14 action poses |
+| Poses (3D) | `python viewers/test_poses_3d_viewer.py` | 3D poses |
+| Creature Poses | `python viewers/test_creature_poses_viewer.py` | Sleeping/resting/combat poses |
+| Mounts (2D) | `python viewers/test_mount_viewer.py` | Rider/mount combinations |
+| Mounts (3D) | `python viewers/test_mount_3d_viewer.py` | 3D mounted riders |
+| Buildings (2.5D) | `python viewers/test_building_25d_viewer.py` | All 63 blueprints with roofs |
+| Buildings (3D) | `python viewers/test_building_3d_viewer.py` | OpenGL building viewer |
+| Terrain | `python viewers/test_terrain_viewer.py` | All 70 terrain types |
+| World Objects | `python viewers/test_objects_viewer.py` | Siege engines, vehicles, walls |
+| World Objects (3D) | `python viewers/test_objects_3d_viewer.py` | 3D siege engines and vehicles |
 
 ## Screenshots
 

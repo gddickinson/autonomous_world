@@ -109,6 +109,11 @@ class WorldManager:
             if not biome_data:
                 continue
 
+            # Biome-specific spawn chance (e.g. water tiles spawn less often)
+            spawn_chance = biome_data.get("spawn_chance", 1.0)
+            if spawn_chance < 1.0 and rng.random() > spawn_chance:
+                continue
+
             # Must be far from ALL settlements
             too_close = any(
                 math.sqrt((sx - x)**2 + (sy - y)**2) < exclusion_r
@@ -125,6 +130,11 @@ class WorldManager:
 
             kind = self._pick_biome_creature(rng, biome_data)
             if not kind:
+                continue
+
+            # High-CR undead never spawn in the wild — only at ruins/crypts
+            from game.data.ecology import HIGH_CR_UNDEAD as _HCU
+            if kind in _HCU:
                 continue
 
             # Water-only restriction
@@ -149,26 +159,29 @@ class WorldManager:
                     self.creatures.append(creature)
                     spawned_total += 1
 
-        # Spawn farm animals near settlements
-        farm_animals = SETTLEMENT_CREATURES["common"]
+        # Spawn domestic animals near settlements using per-type tables
+        from game.data.ecology import SETTLEMENT_DOMESTIC, HIGH_CR_UNDEAD
         guard_animals = SETTLEMENT_CREATURES["guard"]
         for s in self.world.structures:
-            if s.kind not in ("village", "town", "city", "hamlet"):
+            if s.kind not in ("village", "town", "city", "hamlet", "castle"):
                 continue
-            num_farm = rng.randint(3, 8)
-            for _ in range(num_farm):
-                kind = rng.choice(farm_animals)
-                fx = s.x + rng.randint(-s.radius, s.radius)
-                fy = s.y + rng.randint(-s.radius, s.radius)
-                if (0 <= fx < self.world.width and 0 <= fy < self.world.height
-                        and self.world.is_walkable(fx, fy)):
-                    creature = Creature(float(fx), float(fy), kind)
-                    creature.home_x = float(s.x)
-                    creature.home_y = float(s.y)
-                    creature.leash_range = float(s.radius + 5)
-                    self.creatures.append(creature)
+            domestic_table = SETTLEMENT_DOMESTIC.get(s.kind, SETTLEMENT_DOMESTIC["village"])
+            for category in ("always", "farm", "stable"):
+                entries = domestic_table.get(category, [])
+                for kind, lo, hi in entries:
+                    count = rng.randint(lo, hi)
+                    for _ in range(count):
+                        fx = s.x + rng.randint(-s.radius, s.radius)
+                        fy = s.y + rng.randint(-s.radius, s.radius)
+                        if (0 <= fx < self.world.width and 0 <= fy < self.world.height
+                                and self.world.is_walkable(fx, fy)):
+                            creature = Creature(float(fx), float(fy), kind)
+                            creature.home_x = float(s.x)
+                            creature.home_y = float(s.y)
+                            creature.leash_range = float(s.radius + 5)
+                            self.creatures.append(creature)
             # Guard dogs at perimeter
-            for _ in range(rng.randint(1, 2)):
+            for _ in range(rng.randint(1, 3)):
                 kind = rng.choice(guard_animals)
                 angle = rng.uniform(0, 2 * 3.14159)
                 gx = int(s.x + math.cos(angle) * s.radius * 0.9)
@@ -182,8 +195,15 @@ class WorldManager:
                     self.creatures.append(creature)
 
         # Spawn undead/dungeon creatures in ruins
+        # High-CR undead only in undead_crypt, and at low rate
         ruin_monsters = [name for name, stats in MONSTERS.items()
-                         if "floor" in stats.get("biomes", [])]
+                         if "floor" in stats.get("biomes", [])
+                         and name not in HIGH_CR_UNDEAD]
+        # Crypts get all undead but high-CR ones spawn at 5% rate
+        crypt_low_cr = [name for name, stats in MONSTERS.items()
+                        if "floor" in stats.get("biomes", [])
+                        and name not in HIGH_CR_UNDEAD]
+        crypt_high_cr = [name for name in HIGH_CR_UNDEAD]
         for s in self.world.structures:
             if s.kind == "ruins":
                 for _ in range(rng.randint(3, 6)):
@@ -196,10 +216,34 @@ class WorldManager:
                         creature.home_y = float(s.y)
                         creature.leash_range = float(s.radius + 5)
                         self.creatures.append(creature)
+            elif s.kind == "undead_crypt":
+                for _ in range(rng.randint(4, 8)):
+                    # 5% chance of high-CR undead, otherwise low-CR
+                    if rng.random() < 0.05 and crypt_high_cr:
+                        kind = rng.choice(crypt_high_cr)
+                    else:
+                        kind = rng.choice(crypt_low_cr) if crypt_low_cr else "skeleton"
+                    cx = s.x + rng.randint(-s.radius, s.radius)
+                    cy = s.y + rng.randint(-s.radius, s.radius)
+                    if self.world.is_walkable(cx, cy):
+                        creature = Creature(float(cx), float(cy), kind)
+                        creature.home_x = float(s.x)
+                        creature.home_y = float(s.y)
+                        creature.leash_range = float(s.radius + 5)
+                        self.creatures.append(creature)
+
+        # Guaranteed hostile spawns near the Temple of Awakening
+        from game.systems.spawn_hostiles import spawn_starter_hostiles
+        spawn_starter_hostiles(self.world, self.creatures, rng)
 
     def _spawn_npcs(self, rng: random.Random):
-        """Spawn NPCs using building-based spawn data or fallback method."""
+        """Spawn NPCs using building-based spawn data or fallback method.
+
+        Character class is derived from the NPC's profession via
+        JOB_TO_CLASS so that a Guard becomes a Fighter, etc.
+        """
         from game.data.dnd import random_npc_class_and_race
+        from game.data.job_classes import get_class_for_job
 
         name_pool = list(NPC_NAMES) + [
             "Alara", "Brom", "Circe", "Dorian", "Elowen", "Faelen",
@@ -228,10 +272,7 @@ class WorldManager:
                 name = name_pool[name_idx]
                 name_idx += 1
 
-                char_class = spawn.get("class", "")
                 race = spawn.get("race", "")
-                if not char_class or not race:
-                    char_class, race = random_npc_class_and_race()
                 if not race:
                     _, race = random_npc_class_and_race()
 
@@ -241,12 +282,18 @@ class WorldManager:
                 profession = spawn.get("profession", "")
                 if not profession:
                     profession = self._pick_settlement_profession(
-                        spawn["x"], spawn["y"], rng) or char_class
+                        spawn["x"], spawn["y"], rng) or "Laborer"
+
+                # Derive class from profession (not random)
+                char_class = get_class_for_job(profession)
+
                 npc = NPC(spawn["x"], spawn["y"], name, profession,
                          char_class=char_class, race=race, level=level)
                 npc.home_x = spawn["x"]
                 npc.home_y = spawn["y"]
                 self.npcs.append(npc)
+            # Guarantee at least one merchant per settlement with a market
+            self._ensure_merchants(rng, name_pool, name_idx)
         else:
             # Fallback: spawn in structures with settlement-appropriate professions
             from game.settings import SETTLEMENT_PROFESSIONS
@@ -270,11 +317,14 @@ class WorldManager:
                     name = name_pool[name_idx]
                     name_idx += 1
 
-                    char_class, race = random_npc_class_and_race()
+                    _, race = random_npc_class_and_race()
                     level = rng.randint(1, 5)
 
                     # Pick a profession appropriate for this settlement
-                    profession = rng.choice(weighted_profs) if weighted_profs else char_class
+                    profession = rng.choice(weighted_profs) if weighted_profs else "Laborer"
+
+                    # Derive class from profession (not random)
+                    char_class = get_class_for_job(profession)
 
                     pos = self.world.find_open_pos_near(
                         structure.x, structure.y, structure.radius + 2, rng)
@@ -283,6 +333,99 @@ class WorldManager:
                     npc.home_x = float(pos[0])
                     npc.home_y = float(pos[1])
                     self.npcs.append(npc)
+
+            # Guarantee at least one merchant per settlement with a market
+            self._ensure_merchants(rng, name_pool, name_idx)
+
+    def _ensure_merchants(self, rng: random.Random,
+                          name_pool: list, name_idx: int):
+        """Ensure every settlement with a market/shop building has a Merchant.
+
+        If no Merchant NPC was assigned naturally for a settlement that
+        contains a market_stall or fish_market building, force-spawn one
+        at the market building's position.
+        """
+        from game.data.dnd import random_npc_class_and_race
+        from game.data.job_classes import get_class_for_job
+
+        market_kinds = {"market_stall", "fish_market", "shop"}
+        settlement_kinds = {"village", "town", "city", "hamlet", "castle"}
+
+        for structure in self.world.structures:
+            if structure.kind not in settlement_kinds:
+                continue
+
+            # Check if this settlement has a market building
+            has_market = False
+            market_pos = (float(structure.x), float(structure.y))
+
+            buildings = getattr(structure, 'buildings', [])
+            if buildings:
+                for bld in buildings:
+                    if isinstance(bld, dict):
+                        bp = bld.get("blueprint", None)
+                        bld_kind = ""
+                        if bp is not None:
+                            bld_kind = getattr(bp, 'name', '') or getattr(bp, 'kind', '')
+                        bld_kind = bld_kind or bld.get("kind", "")
+                        if bld_kind in market_kinds:
+                            has_market = True
+                            market_pos = (float(bld.get("x", structure.x)),
+                                          float(bld.get("y", structure.y)))
+                            break
+                    elif isinstance(bld, (tuple, list)) and len(bld) >= 2:
+                        # buildings stored as (x, y, w, h) tuples
+                        pass  # no kind info in tuple form
+
+            # Also check spawn data for buildings with "market" in name
+            if not has_market:
+                spawn_data = getattr(self.world, 'npc_spawn_data', [])
+                for sp in spawn_data:
+                    bld_name = sp.get("building", "").lower()
+                    if "market" in bld_name or "shop" in bld_name:
+                        sx, sy = sp["x"], sp["y"]
+                        dx = sx - structure.x
+                        dy = sy - structure.y
+                        if dx * dx + dy * dy < (structure.radius + 5) ** 2:
+                            has_market = True
+                            market_pos = (float(sx), float(sy))
+                            break
+
+            if not has_market:
+                # Settlements of type town/city always get a merchant
+                if structure.kind in ("town", "city"):
+                    has_market = True
+
+            if not has_market:
+                continue
+
+            # Check if any existing NPC in this settlement is a Merchant
+            has_merchant = False
+            for npc in self.npcs:
+                if npc.profession == "Merchant":
+                    dx = npc.home_x - structure.x
+                    dy = npc.home_y - structure.y
+                    if dx * dx + dy * dy < (structure.radius + 10) ** 2:
+                        has_merchant = True
+                        break
+
+            if has_merchant:
+                continue
+
+            # Force-spawn a Merchant
+            if name_idx >= len(name_pool):
+                name_idx = 0
+            name = name_pool[name_idx]
+            name_idx += 1
+            _, race = random_npc_class_and_race()
+            level = rng.randint(1, 5)
+            char_class = get_class_for_job("Merchant")  # "Rogue"
+
+            npc = NPC(market_pos[0], market_pos[1], name, "Merchant",
+                      char_class=char_class, race=race, level=level)
+            npc.home_x = market_pos[0]
+            npc.home_y = market_pos[1]
+            self.npcs.append(npc)
 
     def _pick_settlement_profession(self, x: float, y: float,
                                      rng: random.Random) -> str:
@@ -364,6 +507,9 @@ class WorldManager:
             npc.home_y = float(sy)
             self.npcs.append(npc)
 
+        # Guarantee at least one merchant per settlement with a market
+        self._ensure_merchants(rng, name_pool, name_idx)
+
         # Track populated settlements
         for s in self.world.structures:
             if s.kind in ("village", "town", "city", "hamlet", "castle"):
@@ -399,6 +545,11 @@ class WorldManager:
             if not biome_data:
                 continue
 
+            # Biome-specific spawn chance (e.g. water tiles spawn less often)
+            spawn_chance = biome_data.get("spawn_chance", 1.0)
+            if spawn_chance < 1.0 and rng.random() > spawn_chance:
+                continue
+
             # Must be far from settlements (wild creatures)
             too_close = any(
                 math.sqrt((sx - x)**2 + (sy - y)**2) < excl
@@ -410,6 +561,11 @@ class WorldManager:
             # Pick rarity tier
             kind = self._pick_biome_creature(rng, biome_data)
             if not kind:
+                continue
+
+            # High-CR undead never spawn in the wild — only at ruins/crypts
+            from game.data.ecology import HIGH_CR_UNDEAD as _HCU
+            if kind in _HCU:
                 continue
 
             # Water-only creatures need water tile
@@ -436,28 +592,30 @@ class WorldManager:
                 self.creatures.append(creature)
                 spawned_total += 1
 
-        # --- Spawn farm animals near settlements ---
-        farm_animals = SETTLEMENT_CREATURES["common"]
+        # --- Spawn domestic animals near settlements using per-type tables ---
+        from game.data.ecology import SETTLEMENT_DOMESTIC, HIGH_CR_UNDEAD
         guard_animals = SETTLEMENT_CREATURES["guard"]
         for s in self.world.structures:
-            if s.kind not in ("village", "town", "city", "hamlet"):
+            if s.kind not in ("village", "town", "city", "hamlet", "castle"):
                 continue
             if abs(s.x - px) > zone_radius or abs(s.y - py) > zone_radius:
                 continue
-            # Spawn 3-8 farm animals inside settlement radius
-            num_farm = rng.randint(3, 8)
-            for _ in range(num_farm):
-                kind = rng.choice(farm_animals)
-                fx = s.x + rng.randint(-s.radius, s.radius)
-                fy = s.y + rng.randint(-s.radius, s.radius)
-                if self.world.is_walkable(fx, fy):
-                    creature = Creature(float(fx), float(fy), kind)
-                    creature.home_x = float(s.x)
-                    creature.home_y = float(s.y)
-                    creature.leash_range = float(s.radius + 5)
-                    self.creatures.append(creature)
-            # Spawn 1-2 guard dogs at perimeter
-            for _ in range(rng.randint(1, 2)):
+            domestic_table = SETTLEMENT_DOMESTIC.get(s.kind, SETTLEMENT_DOMESTIC["village"])
+            for category in ("always", "farm", "stable"):
+                entries = domestic_table.get(category, [])
+                for kind, lo, hi in entries:
+                    count = rng.randint(lo, hi)
+                    for _ in range(count):
+                        fx = s.x + rng.randint(-s.radius, s.radius)
+                        fy = s.y + rng.randint(-s.radius, s.radius)
+                        if self.world.is_walkable(fx, fy):
+                            creature = Creature(float(fx), float(fy), kind)
+                            creature.home_x = float(s.x)
+                            creature.home_y = float(s.y)
+                            creature.leash_range = float(s.radius + 5)
+                            self.creatures.append(creature)
+            # Spawn 1-3 guard dogs at perimeter
+            for _ in range(rng.randint(1, 3)):
                 kind = rng.choice(guard_animals)
                 angle = rng.uniform(0, 2 * 3.14159)
                 gx = int(s.x + math.cos(angle) * s.radius * 0.9)
@@ -469,23 +627,35 @@ class WorldManager:
                     creature.leash_range = float(s.radius + 5)
                     self.creatures.append(creature)
 
-        # Spawn undead in nearby ruins
+        # Spawn undead in nearby ruins (high-CR undead only in crypts at 5%)
         ruin_monsters = [n for n, s in MONSTERS.items()
-                         if "floor" in s.get("biomes", [])]
+                         if "floor" in s.get("biomes", [])
+                         and n not in HIGH_CR_UNDEAD]
+        crypt_high_cr = list(HIGH_CR_UNDEAD)
         for s in self.world.structures:
-            if s.kind == "ruins":
-                if abs(s.x - px) > zone_radius or abs(s.y - py) > zone_radius:
-                    continue
-                for _ in range(rng.randint(3, 6)):
+            if s.kind not in ("ruins", "undead_crypt"):
+                continue
+            if abs(s.x - px) > zone_radius or abs(s.y - py) > zone_radius:
+                continue
+            count = rng.randint(4, 8) if s.kind == "undead_crypt" else rng.randint(3, 6)
+            for _ in range(count):
+                # In crypts: 5% chance of high-CR undead
+                if s.kind == "undead_crypt" and rng.random() < 0.05 and crypt_high_cr:
+                    kind = rng.choice(crypt_high_cr)
+                else:
                     kind = rng.choice(ruin_monsters) if ruin_monsters else "skeleton"
-                    cx = s.x + rng.randint(-s.radius, s.radius)
-                    cy = s.y + rng.randint(-s.radius, s.radius)
-                    if self.world.is_walkable(cx, cy):
-                        creature = Creature(float(cx), float(cy), kind)
-                        creature.home_x = float(s.x)
-                        creature.home_y = float(s.y)
-                        creature.leash_range = float(s.radius + 5)
-                        self.creatures.append(creature)
+                cx = s.x + rng.randint(-s.radius, s.radius)
+                cy = s.y + rng.randint(-s.radius, s.radius)
+                if self.world.is_walkable(cx, cy):
+                    creature = Creature(float(cx), float(cy), kind)
+                    creature.home_x = float(s.x)
+                    creature.home_y = float(s.y)
+                    creature.leash_range = float(s.radius + 5)
+                    self.creatures.append(creature)
+
+        # Guaranteed hostile spawns near the Temple of Awakening
+        from game.systems.spawn_hostiles import spawn_starter_hostiles
+        spawn_starter_hostiles(self.world, self.creatures, rng)
 
     def _check_zone_activation(self, player):
         """Check if the player has moved into an unpopulated zone and activate it."""
@@ -837,12 +1007,134 @@ class WorldManager:
     # Update loop
     # ------------------------------------------------------------------
 
+    def _check_settlement_population(self, player):
+        """Spawn NPCs at settlements the player approaches for the first time.
+
+        Ensures distant settlements get populated when the player (or god
+        camera) moves near them, even if the zone activation system hasn't
+        triggered yet. Throttled to check every ~1 second.
+        """
+        if not hasattr(self, '_settlement_check_tick'):
+            self._settlement_check_tick = 0
+        self._settlement_check_tick += 1
+        if self._settlement_check_tick < 30:
+            return
+        self._settlement_check_tick = 0
+
+        if not hasattr(self, '_populated_settlements'):
+            self._populated_settlements = set()
+
+        for settlement in self.world.structures:
+            if settlement.kind not in ("village", "town", "city", "hamlet", "castle"):
+                continue
+            if settlement.name in self._populated_settlements:
+                continue
+            if abs(settlement.x - player.x) < 500 and abs(settlement.y - player.y) < 500:
+                self._populate_settlement(settlement)
+                self._populated_settlements.add(settlement.name)
+
+    def _populate_settlement(self, settlement):
+        """Spawn NPCs at a settlement that hasn't been populated yet."""
+        from game.data.dnd import random_npc_class_and_race
+
+        rng = random.Random()
+        spawn_data = getattr(self.world, 'npc_spawn_data', [])
+
+        # Find spawn points belonging to this settlement
+        settlement_spawns = []
+        for spawn in spawn_data:
+            sx, sy = spawn["x"], spawn["y"]
+            # Check if spawn point is within settlement radius
+            dist = math.sqrt((sx - settlement.x)**2 + (sy - settlement.y)**2)
+            if dist < settlement.radius + 20:
+                key = (int(sx), int(sy))
+                if not hasattr(self, '_populated_settlements_pos'):
+                    self._populated_settlements_pos = set()
+                if key not in self._populated_settlements_pos:
+                    settlement_spawns.append(spawn)
+                    self._populated_settlements_pos.add(key)
+
+        # Spawn NPCs from the matching spawn data
+        for spawn in settlement_spawns:
+            sx, sy = spawn["x"], spawn["y"]
+            char_class = spawn.get("class", "")
+            race = spawn.get("race", "")
+            if not char_class or not race:
+                char_class, race = random_npc_class_and_race()
+
+            name = spawn.get("name", f"NPC_{rng.randint(1000, 9999)}")
+            level = rng.randint(1, 5)
+            profession = spawn.get("profession", "")
+            if not profession:
+                profession = self._pick_settlement_profession(
+                    float(sx), float(sy), rng) or char_class
+            npc = NPC(float(sx), float(sy), name, profession,
+                     char_class=char_class, race=race, level=level)
+            npc.home_x = float(sx)
+            npc.home_y = float(sy)
+            self.npcs.append(npc)
+
+            # Generate backstory
+            try:
+                from game.systems.backstory import generate_backstory
+                from game.world.regions import get_region_at
+                regions = getattr(self.world, 'regions', None)
+                region_name = ""
+                if regions:
+                    region_name = get_region_at(int(sx), int(sy), regions) or ""
+                generate_backstory(npc, self.world.structures, region_name)
+            except Exception:
+                pass
+
+        # If no spawn data matched, create some generic NPCs
+        if not settlement_spawns:
+            pop_count = {"hamlet": 3, "village": 5, "town": 8,
+                         "city": 12, "castle": 6}.get(settlement.kind, 4)
+            for _ in range(pop_count):
+                char_class, race = random_npc_class_and_race()
+                name = f"NPC_{rng.randint(1000, 9999)}"
+                level = rng.randint(1, 5)
+                # Place near settlement center
+                nx = settlement.x + rng.uniform(-settlement.radius * 0.5,
+                                                  settlement.radius * 0.5)
+                ny = settlement.y + rng.uniform(-settlement.radius * 0.5,
+                                                  settlement.radius * 0.5)
+                profession = self._pick_settlement_profession(
+                    float(nx), float(ny), rng) or char_class
+                npc = NPC(float(nx), float(ny), name, profession,
+                         char_class=char_class, race=race, level=level)
+                npc.home_x = float(nx)
+                npc.home_y = float(ny)
+                self.npcs.append(npc)
+
+        # Generate quests for some of the new NPCs
+        settlement_npcs = [
+            n for n in self.npcs
+            if math.sqrt((n.x - settlement.x)**2 +
+                         (n.y - settlement.y)**2) < settlement.radius + 20
+        ]
+        quest_givers = random.sample(
+            settlement_npcs, min(2, len(settlement_npcs)))
+        for npc in quest_givers:
+            if not hasattr(npc, 'quest') or npc.quest is None:
+                # Use the game's quest system if available via simulation ref
+                sim = getattr(self, '_simulation_ref', None)
+                if sim and hasattr(sim, 'quest_system'):
+                    sim.quest_system.generate_quest_for_npc(npc)
+
     def update(self, dt: float, player: Player, game_time: float):
         """Update all world entities."""
         # Zone activation for chunked worlds — populate new areas as player moves
         from game.world.world import ChunkedWorld
         if isinstance(self.world, ChunkedWorld):
             self._check_zone_activation(player)
+            self._check_settlement_population(player)
+
+            # Boundary-aware chunk preloading — runs every frame but is
+            # cheap (no-ops if chunks are already loaded). Prevents terrain
+            # pop-in when the player approaches a chunk boundary.
+            if hasattr(self.world.tiles, 'preload_boundary_aware'):
+                self.world.tiles.preload_boundary_aware(player.x, player.y)
 
         # --- Dormancy check (every DORMANCY_CHECK_TICKS ticks) ---
         self._dormancy_tick += 1

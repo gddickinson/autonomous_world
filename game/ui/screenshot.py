@@ -481,9 +481,23 @@ class HeadlessGame:
 
         if mode == "god":
             self.player.god = True
+            self.player.race = "God"
+            self.player.char_class = "God"
             self.player.hp = 99999
             self.player.max_hp = 99999
             self.player.speed = PLAYER_SPEED * 3
+            self.player.attack_damage = 9999
+            self.player.defense = 999
+            self.player.level = 99
+            for ab in ("strength", "dexterity", "constitution",
+                       "intelligence", "wisdom", "charisma"):
+                self.player.ability_scores[ab] = 30
+            from game.systems.magic import SPELL_REGISTRY, SOUL_SPELLS
+            self.player.known_spells = list(SPELL_REGISTRY.keys()) + list(SOUL_SPELLS.keys())
+            self.player.is_spellcaster = True
+            self.player.max_mana = 999
+            self.player.mana = 999
+            self.player.gold = 99999
         elif mode == "ghost":
             self.player.ghost = True
             self.player.speed = PLAYER_SPEED * 2
@@ -582,7 +596,7 @@ class HeadlessGame:
             r.draw_npcs(self.world_mgr.npcs, self.camera,
                         self.player, self.visible_tiles)
             r.draw_player(self.player, self.camera)
-            r.draw_night_overlay(self.time_sys.darkness)
+            r.draw_lighting(self.time_sys.normalized, self.camera, self.world)
 
         self.ui.draw_hud(self.player, self.time_sys)
         r.draw_minimap(self.world, self.player,

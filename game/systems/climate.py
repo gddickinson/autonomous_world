@@ -298,8 +298,8 @@ class ClimateModel:
 
     def _update_dry_rain_counters(self):
         """Update regional dry/rain day counters for drought/prolonged-rain detection."""
-        # Sample a grid of points
-        step = 500
+        # Sample a coarse grid (1000-tile spacing = 10x10 = 100 samples)
+        step = 1000
         for bx in range(0, self.width, step):
             by_key = bx // step
             for by in range(0, self.height, step):
@@ -465,12 +465,19 @@ class ClimateModel:
     def _coastal_factor(self, x: float, y: float) -> float:
         """How coastal this position is (0=inland, 1=right on water).
 
-        Uses elevation as proxy: tiles near water (elev < 0.22) are coastal.
+        Uses elevation as proxy with coarse caching.
         """
         if self._world_plan is None:
             return 0.0
-        # Sample nearby tiles for water
-        step = 50
+        # Cache at 500-tile resolution
+        if not hasattr(self, '_coastal_cache'):
+            self._coastal_cache = {}
+        cache_key = (int(x) // 500, int(y) // 500)
+        cached = self._coastal_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        # Sample nearby tiles for water (coarser than before)
+        step = 100
         water_count = 0
         total = 0
         for dx in range(-200, 201, step):
@@ -481,7 +488,9 @@ class ClimateModel:
                 total += 1
                 if elev < 0.22:
                     water_count += 1
-        return min(1.0, water_count / max(1, total) * 3.0)
+        result = min(1.0, water_count / max(1, total) * 3.0)
+        self._coastal_cache[cache_key] = result
+        return result
 
     def _rain_shadow_factor(self, x: float, y: float) -> float:
         """Rain shadow: tiles east of mountains are drier (returns 0-1 moisture multiplier)."""

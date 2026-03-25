@@ -7,7 +7,8 @@ class Item:
     """An item that can be held in inventory."""
     def __init__(self, name: str, kind: str, value: int = 1,
                  damage: int = 0, defense: int = 0, heal: int = 0,
-                 description: str = "", stackable: bool = False):
+                 description: str = "", stackable: bool = False,
+                 bonuses: dict = None):
         self.name = name
         self.kind = kind
         self.value = value
@@ -17,8 +18,10 @@ class Item:
         self.description = description
         self.stackable = stackable
         self.count = 1
+        # Artifact/unique item bonus stats (e.g. {"stealth": 3, "speed": 0.25})
+        self.bonuses = bonuses or {}
         # Durability (weapons and armor degrade with use)
-        if kind in (ITEM_WEAPON, ITEM_ARMOR):
+        if kind in (ITEM_WEAPON, ITEM_ARMOR, ITEM_ARTIFACT):
             self.durability = 100
             self.max_durability = 100
         else:
@@ -28,7 +31,7 @@ class Item:
 
 # Pre-defined items
 ITEMS = {
-    "Wooden Sword":    Item("Wooden Sword", ITEM_WEAPON, 10, damage=8, description="A basic wooden sword."),
+    "Wooden Sword":    Item("Wooden Sword", ITEM_WEAPON, 10, damage=6, description="A basic wooden practice sword."),
     "Iron Sword":      Item("Iron Sword", ITEM_WEAPON, 50, damage=18, description="A sturdy iron blade."),
     "Steel Sword":     Item("Steel Sword", ITEM_WEAPON, 150, damage=28, description="A finely crafted steel sword."),
     "Hunting Bow":     Item("Hunting Bow", ITEM_WEAPON, 40, damage=14, description="A simple hunting bow."),
@@ -293,6 +296,43 @@ ITEMS = {
     # === HUMAN SPECIALTY GOODS ===
     "Fine Ale":        Item("Fine Ale", ITEM_DRINK, 8, heal=2, description="A premium brew of exceptional quality.", stackable=True),
     "Embroidered Cloth": Item("Embroidered Cloth", ITEM_RESOURCE, 12, description="Beautifully embroidered fabric.", stackable=True),
+    # === PET & BOAT SYSTEM ===
+    "Cloth":           Item("Cloth", ITEM_RESOURCE, 3, description="Plain woven cloth.", stackable=True),
+    "Boat":            Item("Boat", ITEM_TOOL, 100, description="A sturdy wooden boat for river and coastal travel."),
+    # === UNIQUE QUEST ARTIFACTS ===
+    "Blade of the Dawn": Item(
+        "Blade of the Dawn", ITEM_ARTIFACT, 500, damage=15,
+        description="A radiant blade forged in the fires of dawn. +15 ATK, bonus fire damage.",
+        bonuses={"fire_damage": 8, "attack": 15}),
+    "Ring of Shadows": Item(
+        "Ring of Shadows", ITEM_ARTIFACT, 400, defense=1,
+        description="A dark ring that bends light around the wearer. +3 stealth.",
+        bonuses={"stealth": 3}),
+    "Crown of the Vanquished Lich": Item(
+        "Crown of the Vanquished Lich", ITEM_ARTIFACT, 1000, defense=3,
+        description="A crown pried from an undead king. +5 to all attributes.",
+        bonuses={"strength": 5, "intelligence": 5, "charisma": 5,
+                 "dexterity": 5, "wisdom": 5, "constitution": 5}),
+    "Boots of Swiftness": Item(
+        "Boots of Swiftness", ITEM_ARTIFACT, 350, defense=1,
+        description="Enchanted boots that quicken the wearer. +25% movement speed.",
+        bonuses={"speed": 0.25}),
+    "Amulet of the Sea": Item(
+        "Amulet of the Sea", ITEM_ARTIFACT, 300, defense=1,
+        description="A coral amulet blessed by sea spirits. Breathe underwater.",
+        bonuses={"water_breathing": 1}),
+    "Shield of the Faithful": Item(
+        "Shield of the Faithful", ITEM_ARTIFACT, 450, defense=10,
+        description="A holy shield that turns aside blows. +10 DEF, 50% block chance.",
+        bonuses={"block_chance": 0.5}),
+    "Staff of the Archmage": Item(
+        "Staff of the Archmage", ITEM_ARTIFACT, 600, damage=12,
+        description="A staff crackling with arcane power. +50% spell damage.",
+        bonuses={"spell_damage": 0.5}),
+    "Cloak of Many Stars": Item(
+        "Cloak of Many Stars", ITEM_ARTIFACT, 400, defense=2,
+        description="A shimmering cloak woven from starlight. +3 CHA, invisibility at night.",
+        bonuses={"charisma": 3, "night_invisibility": 1}),
 }
 
 # Food items that satisfy hunger
@@ -344,5 +384,6 @@ def make_item(name: str) -> Item:
         return Item(name, ITEM_RESOURCE, 1)
     i = Item(template.name, template.kind, template.value,
              template.damage, template.defense, template.heal,
-             template.description, template.stackable)
+             template.description, template.stackable,
+             bonuses=dict(template.bonuses) if template.bonuses else None)
     return i

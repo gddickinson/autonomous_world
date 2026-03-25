@@ -39,6 +39,96 @@ def _get_npcs_inside(game, interior):
     return npcs
 
 
+def _start_creature_dialog(game, creature):
+    """Start a dialog with an intelligent creature."""
+    from game.core.creature_dialogs import build_creature_dialog
+    dialog_lines = build_creature_dialog(creature)
+    if not dialog_lines:
+        game.notifications.add("This creature can't talk.", 1.5, GRAY)
+        return
+
+    # Set temporary attributes so the dialog panel can render it
+    creature.dialog_lines = dialog_lines
+    if not hasattr(creature, 'name') or not creature.name:
+        creature.name = creature.kind.replace('_', ' ').title()
+    if not hasattr(creature, 'profession'):
+        creature.profession = creature.monster_type
+    if not hasattr(creature, 'consciousness'):
+        creature.consciousness = 0
+    if not hasattr(creature, 'shop_items'):
+        creature.shop_items = []
+    if not hasattr(creature, 'needs'):
+        creature.needs = {}
+    if not hasattr(creature, 'player_relationship'):
+        creature.player_relationship = -20
+
+    game.ui.dialog_active = True
+    game.ui.dialog_npc = creature
+    game.ui.dialog_key = "greeting"
+    game.ui.selected_response = 0
+
+
+def _open_quest_board(game, board):
+    """Open the quest board UI for a tavern.
+
+    Sets game state to show quest board panel. The UI rendering and
+    input handling is done in main.py's update loop.
+    """
+    current_day = int(getattr(game.time_sys, 'day', 0))
+    player_level = getattr(game.player, 'level', 1)
+
+    if board.needs_refresh(current_day):
+        board.refresh(current_day, player_level)
+
+    game.quest_board_active = True
+    game.quest_board_settlement = board.settlement_name
+    game.quest_board_listings = board.get_listings()
+    game.quest_board_selected = 0
+
+    if not game.quest_board_listings:
+        game.notifications.add(
+            "The quest board is empty. Check back in a few days.",
+            3.0, (200, 200, 150))
+        game.quest_board_active = False
+    else:
+        game.notifications.add(
+            f"Quest Board - {board.settlement_name} Tavern",
+            2.0, (220, 200, 100))
+
+
+def _open_message_board(game, board):
+    """Open the message board UI for a tavern or town hall."""
+    current_day = int(getattr(game.time_sys, 'day', 0))
+
+    if board.needs_refresh(current_day):
+        board.refresh(current_day)
+
+    game.msg_board_active = True
+    game.msg_board_settlement = board.settlement_name
+    game.msg_board_listings = board.get_listings()
+    game.msg_board_selected = 0
+
+    if not game.msg_board_listings:
+        game.notifications.add(
+            "The message board is empty.", 2.0, (200, 200, 150))
+        game.msg_board_active = False
+    else:
+        game.notifications.add(
+            f"Message Board - {board.settlement_name}",
+            2.0, (160, 170, 220))
+
+
+def _open_board_menu(game, quest_board, msg_board):
+    """Show a selection menu: Quest Board or Message Board."""
+    game.board_menu_active = True
+    game.board_menu_quest_board = quest_board
+    game.board_menu_msg_board = msg_board
+    game.board_menu_selected = 0
+    game.notifications.add(
+        "Press 1 for Quest Board, 2 for Message Board, Esc to close",
+        4.0, (220, 200, 100))
+
+
 def _start_dialog(game, npc):
     """Start a dialog with an NPC — uses shared conversation_rules.
 
@@ -113,6 +203,9 @@ def _start_dialog(game, npc):
     game.ui.dialog_key = "greeting"
     game.ui.selected_response = 0
     npc.player_relationship = max(-100, min(100, npc.player_relationship + 1))
+    # Audio: NPC greeting sound
+    if hasattr(game, 'sound'):
+        game.sound.play("npc_greeting")
 
     if hasattr(game, 'quest_sys'):
         game.quest_sys.on_npc_interaction(npc.name)
@@ -249,6 +342,8 @@ def interact(game):
 
             loot_gold = random.randint(gold_min, gold_max)
             game.player.gold += loot_gold
+            if hasattr(game, 'sound'):
+                game.sound.play("gold_pickup")
             msg = f"Found {loot_gold} gold"
 
             item_name = random.choice(items)
@@ -646,6 +741,25 @@ def interact(game):
                         game.notifications.add("The barrel is empty.", 1.0, (150, 150, 150))
                         return
 
+            # Check if player is inside a tavern/town hall — show board menu
+            if hasattr(game, 'quest_board_mgr'):
+                quest_board = game.quest_board_mgr.find_board_for_position(
+                    game.world, px_int, py_int)
+                msg_board = None
+                if hasattr(game, 'msg_board_mgr'):
+                    msg_board = game.msg_board_mgr.find_board_for_position(
+                        game.world, px_int, py_int)
+                if quest_board and msg_board:
+                    # Both available — show selection prompt
+                    _open_board_menu(game, quest_board, msg_board)
+                    return
+                elif quest_board:
+                    _open_quest_board(game, quest_board)
+                    return
+                elif msg_board:
+                    _open_message_board(game, msg_board)
+                    return
+
     # Try to gather resources from terrain
     px, py = int(game.player.x), int(game.player.y)
     if 0 <= px < game.world.width and 0 <= py < game.world.height:
@@ -672,6 +786,12 @@ def interact(game):
         game.player.gain_skill_xp("herbalism", 0.3)
 
     if messages:
+        return
+
+    # Check for intelligent creature dialog before NPC dialog
+    cr = getattr(game, 'nearby_creature', None)
+    if cr and cr.alive and not game.nearby_npc:
+        _start_creature_dialog(game, cr)
         return
 
     if game.nearby_npc:
@@ -858,6 +978,7 @@ def attack(game):
     game.attack_flash_timer = 0.1
 
     # God mode: instant kill
+    _cfx = getattr(game.active_renderer, 'combat_fx', None)
     if getattr(game.player, 'god', False) and next_target.alive:
         name = getattr(next_target, 'name', getattr(next_target, 'kind', '?'))
         next_target.take_damage(99999)
@@ -868,6 +989,8 @@ def attack(game):
                                               (255, 220, 100))
         if hasattr(game.renderer, 'spawn_death_effect'):
             game.renderer.spawn_death_effect(next_target.x, next_target.y)
+        if _cfx:
+            _cfx.on_damage_dealt(next_target, 99999, is_kill=True)
         game.player.gain_skill_xp("swordsmanship", 0.2)
         return
 
@@ -882,6 +1005,9 @@ def attack(game):
             if hasattr(game.renderer, 'spawn_damage_popup'):
                 game.renderer.spawn_damage_popup(next_target.x, next_target.y,
                                                   int(bonus_dmg), (255, 220, 60))
+            if _cfx:
+                _cfx.on_damage_dealt(next_target, int(bonus_dmg),
+                                     is_kill=not next_target.alive)
 
     game.player.gain_skill_xp("swordsmanship", 0.2)
 

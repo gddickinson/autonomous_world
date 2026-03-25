@@ -220,8 +220,13 @@ class TroopUnit:
         self.check_rout()
 
     def check_rout(self):
-        if self.morale < self.stats.get("morale_threshold", 25):
-            self.routed = True
+        threshold = self.stats.get("morale_threshold", 25)
+        if self.morale < threshold:
+            # Gradual morale break: probability of rout increases as morale
+            # drops further below threshold, rather than instant rout
+            rout_chance = (threshold - self.morale) / max(1, threshold)
+            if random.random() < rout_chance:
+                self.routed = True
 
     def apply_fatigue(self, rounds: int = 1):
         self.fatigue = min(100, self.fatigue + rounds * 5)
@@ -470,6 +475,20 @@ class BattleField:
                             target.heal_casualties(heal)
                             break
 
+            # --- PER-ROUND CASUALTY CAP ---
+            # Cap casualties at 20% of each side per round for paced battles
+            # Battles should last 3-5 rounds minimum
+            atk_cap = max(1, int(self.attacker.total_size * 0.20))
+            def_cap = max(1, int(self.defender.total_size * 0.20))
+            atk_casualties = min(atk_casualties, atk_cap)
+            def_casualties = min(def_casualties, def_cap)
+
+            # During early rounds (1-2), further reduce casualties to ensure
+            # battles last at least 3 rounds
+            if round_num <= 2:
+                atk_casualties = max(1, atk_casualties // 2)
+                def_casualties = max(1, def_casualties // 2)
+
             # --- DISTRIBUTE CASUALTIES ---
             self._distribute_casualties(self.attacker, atk_casualties)
             self._distribute_casualties(self.defender, def_casualties)
@@ -545,7 +564,7 @@ class BattleField:
                     bonus += (mb - 1.0) * weight * 0.5
                 # Spear vs cavalry specific bonus
                 if du.category == "cavalry" and au.stats.get("bonus_vs_cavalry", 0) > 0:
-                    bonus += au.stats["bonus_vs_cavalry"] * 0.1
+                    bonus += au.stats["bonus_vs_cavalry"] * 0.3
         return max(0.5, min(2.0, bonus))
 
     def _distribute_casualties(self, army: BattleArmy, total: int):
@@ -763,16 +782,19 @@ class MilitaryUnit:
         # Morale drops with casualties
         self.morale = max(0, 70 - int(casualty_ratio * 60))
 
-        # Check rout
+        # Check rout — gradual morale break instead of instant
         threshold = self.base_stats.get("morale_threshold", 25)
         if self.morale < threshold and not self.routed:
-            self.routed = True
-            # All surviving members flee
-            for m in self.members:
-                if m.alive and hasattr(m, 'state'):
-                    m.state = "fleeing"
-                    if hasattr(m, 'current_action'):
-                        m.current_action = "fleeing"
+            # Probability of rout scales with how far below threshold
+            rout_chance = (threshold - self.morale) / max(1, threshold)
+            if random.random() < rout_chance:
+                self.routed = True
+                # All surviving members flee
+                for m in self.members:
+                    if m.alive and hasattr(m, 'state'):
+                        m.state = "fleeing"
+                        if hasattr(m, 'current_action'):
+                            m.current_action = "fleeing"
 
     def rally(self, leadership: int = 0) -> bool:
         """Commander attempts to rally a routed unit."""

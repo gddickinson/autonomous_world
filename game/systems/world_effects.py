@@ -1307,7 +1307,7 @@ class WorldEffects:
         def _is_near_loaded(sx, sy):
             """Check if a settlement is in or near a loaded chunk."""
             if not loaded_chunks:
-                return True  # no chunk info = process everything
+                return False  # no loaded chunks = skip tile operations
             cx, cy = sx // chunk_size, sy // chunk_size
             for dx in range(-1, 2):
                 for dy in range(-1, 2):
@@ -1352,15 +1352,13 @@ class WorldEffects:
             # Livestock breeding (no tile access)
             self._breed_livestock(name, rng)
 
-            # === TILE-LEVEL UPDATES (only for settlements in loaded chunks) ===
+            # === TILE-LEVEL UPDATES (only for nearby loaded settlements) ===
+            # Skip tile operations for distant settlements to avoid chunk loading
             if _is_near_loaded(sp.x, sp.y):
-                # Farm seasonal growth (reads/writes tiles)
                 if season in ("spring", "summer"):
                     self.seasonal_growth(name)
                 elif season == "autumn":
                     self.harvest_crops(name)
-
-                # Resource regeneration (reads/writes tiles)
                 if rng.random() < 0.15:
                     self.regrow_resource(name, "wood")
 

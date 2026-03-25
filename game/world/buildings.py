@@ -953,6 +953,25 @@ BLUEPRINT_BY_KIND = {
     "customs_house": CUSTOMS_HOUSE,
     "royal_palace": ROYAL_PALACE,
     "money_changer": MONEY_CHANGER,
+    # Race-specific building fallbacks (map to closest generic blueprint)
+    "tree_house": COTTAGE,
+    "tree_platform": MARKET_STALL,
+    "garden_grove": BARN,
+    "bowyer": WORKSHOP,
+    "ranger_post": BARRACKS,
+    "stone_house": HOUSE,
+    "stone_cottage": COTTAGE,
+    "mead_hall": TAVERN,
+    "hut": HOVEL,
+    "war_shrine": CHAPEL,
+    "chieftain_hut": TOWN_HALL,
+    "burrow": HOVEL,
+    "idol_pit": CHAPEL,
+    "boss_hut": TOWN_HALL,
+    "stilted_house": COTTAGE,
+    "healer_hut": HOVEL,
+    "peat_shed": BARN,
+    "smokehouse": WORKSHOP,
 }
 
 

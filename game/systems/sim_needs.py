@@ -188,6 +188,7 @@ class SimNeedsMixin:
                 if evt.affects(npc) and evt.effects.get("plague_dps"):
                     npc.hp = max(0, npc.hp - evt.effects["plague_dps"] * dt)
                     if npc.hp <= 0:
+                        npc._death_cause = "disease"
                         npc.alive = False
                         if hasattr(self, 'burial'):
                             self.burial.on_death(npc, "disease",
@@ -335,12 +336,65 @@ class SimNeedsMixin:
                         npc.target_x = None
                         npc.target_y = None
 
-            # Damage from starvation/dehydration (reduced to give NPCs more time)
-            if npc.needs["hunger"] <= 0:
-                npc.hp -= 0.3 * dt
-            if npc.needs["thirst"] <= 0:
-                npc.hp -= 0.5 * dt
+            # Settlement proximity: slower need decay + passive recovery
+            _npc_settlement = self.world.get_structure_at(npc.x, npc.y)
+            if _npc_settlement and _npc_settlement.kind in ("village", "town", "city", "hamlet", "castle"):
+                # Settlement food/water available — recover 1 point per tick
+                npc.needs["hunger"] = min(100, npc.needs["hunger"] + 1.0 * dt)
+                npc.needs["thirst"] = min(100, npc.needs["thirst"] + 1.0 * dt)
 
+            # HP regeneration when not in combat (0.5 HP/tick if fed and hydrated)
+            if (npc.current_action != "fighting" and npc.hp < npc.max_hp
+                    and npc.needs["hunger"] > 30 and npc.needs["thirst"] > 30):
+                npc.hp = min(npc.max_hp, npc.hp + 0.5 * dt)
+
+            # Death protection for essential NPCs (quest givers, merchants, guards)
+            _is_essential = (getattr(npc, 'has_quest_marker', False)
+                             or npc.profession in ("Merchant", "Blacksmith", "Healer",
+                                                    "Alchemist", "Baker", "Innkeeper",
+                                                    "Armourer", "Herbalist")
+                             or getattr(npc, 'title', 'commoner') == 'guard')
+
+            # Damage from starvation/dehydration — slow damage gives time to find food
+            if npc.needs["hunger"] <= 0:
+                npc.hp -= 0.1 * dt  # slow starvation (1000 ticks to die)
+                if _is_essential:
+                    npc.hp = max(1, npc.hp)  # essential NPCs can't die from needs
+                if not getattr(npc, '_starving_warned', False):
+                    npc.add_memory("survival", "Starving! Need food desperately!", 5)
+                    npc._starving_warned = True
+                    self.event_log.append(
+                        f"{npc.name} is starving!")
+            elif npc.needs["hunger"] > 10:
+                npc._starving_warned = False
+            if npc.needs["thirst"] <= 0:
+                npc.hp -= 0.15 * dt  # dehydration slightly faster than starvation
+                if _is_essential:
+                    npc.hp = max(1, npc.hp)  # essential NPCs can't die from needs
+                if not getattr(npc, '_dehydrated_warned', False):
+                    npc.add_memory("survival", "Dying of thirst!", 5)
+                    npc._dehydrated_warned = True
+                    self.event_log.append(
+                        f"{npc.name} is dying of thirst!")
+            elif npc.needs["thirst"] > 10:
+                npc._dehydrated_warned = False
+
+            # Old age — NPCs over 70 have a small daily chance of dying
+            age = getattr(npc, 'age', 30)
+            if age > 70:
+                # Chance scales with age: ~1% per game day at 70, ~5% at 90+
+                age_risk = (age - 65) * 0.0002 * dt
+                if random.random() < age_risk:
+                    npc._death_cause = "old_age"
+                    npc.hp = 0
+                    npc.add_memory("life", "Growing weaker with age...", 5)
+
+            # Set death cause from needs before calling handler
             if npc.hp <= 0:
+                if not hasattr(npc, '_death_cause') or npc._death_cause is None:
+                    if npc.needs.get("hunger", 50) <= 0:
+                        npc._death_cause = "starvation"
+                    elif npc.needs.get("thirst", 50) <= 0:
+                        npc._death_cause = "dehydration"
                 self._handle_npc_death(npc)
 

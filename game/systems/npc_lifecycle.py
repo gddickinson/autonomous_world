@@ -26,8 +26,8 @@ CLASS_DAILY_WAGE = {
     "Fighter": 2.0, "Wizard": 3.0, "Cleric": 2.5, "Rogue": 3.0,
     "Ranger": 2.0, "Paladin": 2.5, "Barbarian": 1.5, "Bard": 3.5,
     "Druid": 2.0, "Monk": 1.0, "Sorcerer": 3.0, "Warlock": 2.5,
-    # Original professions
-    "Farmer": 1.5, "Blacksmith": 3.0, "Merchant": 4.0, "Healer": 2.5,
+    # Original professions (tuned so gold actually flows)
+    "Farmer": 1.0, "Blacksmith": 4.0, "Merchant": 5.0, "Healer": 2.5,
     "Scholar": 2.0, "Innkeeper": 3.5, "Miner": 2.0, "Fisher": 1.5,
     # Primary Production
     "Fisherman": 1.5, "Hunter": 2.0, "Herbalist": 1.5, "Woodcutter": 1.5,
@@ -45,6 +45,8 @@ CLASS_DAILY_WAGE = {
     # Skilled/Professional
     "Mason": 2.5, "Animal Trainer": 2.5, "Stablemaster": 2.0,
     "Cartographer": 3.0,
+    # Military/Guard
+    "Guard": 3.0, "Soldier": 3.0, "Militia": 2.0,
     # Construction/Labor
     "Builder": 2.0, "Cleaner": 1.0, "Gravedigger": 1.5, "Porter": 1.5,
     "Laborer": 1.0,
@@ -93,9 +95,9 @@ PRODUCTIVE_ACTIONS = {
 # ================================================================
 
 DAILY_COSTS = {
-    "food": 0.3,      # basic food
-    "rent": 0.2,      # housing (serfs/slaves pay 0)
-    "upkeep": 0.1,    # clothing, tools
+    "food": 1.0,      # daily food/lodging (goes to innkeepers/merchants)
+    "rent": 0.5,      # housing rent
+    "upkeep": 0.5,    # clothing, tools, equipment
 }
 
 # Title-based cost multiplier (nobles spend more)
@@ -360,19 +362,31 @@ class NpcLifecycle:
             from game.systems.npc_work import grant_work_skill_xp
             grant_work_skill_xp(npc)
 
-            # Pay from settlement gold pool
+            # Pay from settlement gold pool.
+            # Accumulate fractional gold in a buffer so tiny per-tick wages
+            # don't round to 0 (npc_gold is int via property).
             available_gold = stores.get("gold", 0)
             actual_pay = min(tick_income, available_gold)
             if actual_pay > 0:
                 stores["gold"] = available_gold - actual_pay
-                npc.npc_gold = min(9999, getattr(npc, 'npc_gold', 0) + actual_pay)
+                buf = getattr(npc, '_wage_buffer', 0.0) + actual_pay
+                whole = int(buf)
+                if whole > 0:
+                    npc.npc_gold = min(9999, getattr(npc, 'npc_gold', 0) + whole)
+                    buf -= whole
+                npc._wage_buffer = buf
             # If settlement is broke, NPC earns nothing (realistic!)
         else:
             # No settlement store found — give a minimal subsistence wage
             # so NPCs don't stagnate at zero gold forever.  This represents
             # self-employment, foraging, and informal trade.
             subsistence = tick_income * 0.4
-            npc.npc_gold = min(9999, getattr(npc, 'npc_gold', 0) + subsistence)
+            buf = getattr(npc, '_wage_buffer', 0.0) + subsistence
+            whole = int(buf)
+            if whole > 0:
+                npc.npc_gold = min(9999, getattr(npc, 'npc_gold', 0) + whole)
+                buf -= whole
+            npc._wage_buffer = buf
 
         # Track work status
         if not hasattr(npc, '_days_worked'):
@@ -488,6 +502,33 @@ class NpcLifecycle:
             food_consumed = food_fraction * actual_cost / max(1, stores.get("food", 1))
             stores["food"] = max(0, stores.get("food", 0) - food_consumed)
 
+        # === WEEKLY TAXES (every 7th day: 10% of NPC gold to kingdom) ===
+        if day % 7 == 0:
+            tax = int(getattr(npc, 'npc_gold', 0) * 0.10)
+            if tax > 0:
+                npc.npc_gold = max(0, npc.npc_gold - tax)
+                # Route to kingdom treasury
+                if governance:
+                    kname = governance.get_kingdom_at(npc.x, npc.y) \
+                        if hasattr(governance, 'get_kingdom_at') else None
+                    if kname and kname in governance.kingdoms:
+                        governance.kingdoms[kname].treasury += tax
+
+        # === TRADE TRANSACTIONS (merchants/innkeepers accumulate gold) ===
+        # Merchants and innkeepers receive a daily trade bonus representing
+        # customer purchases flowing through their shops.
+        profession = getattr(npc, 'profession', '')
+        if profession in ("Merchant", "Innkeeper", "Shop Assistant", "Baker"):
+            if stores is not None:
+                # Pull from settlement economy — customers spend gold
+                trade_income = {"Merchant": 3, "Innkeeper": 2,
+                                "Shop Assistant": 1, "Baker": 1}.get(profession, 1)
+                available = stores.get("gold", 0)
+                actual_trade = min(trade_income, available)
+                if actual_trade > 0:
+                    stores["gold"] = available - actual_trade
+                    npc.npc_gold += actual_trade
+
         # === CAREER ADVANCEMENT (title promotions) ===
         self._check_promotion(npc, day, all_npcs)
 
@@ -541,27 +582,45 @@ class NpcLifecycle:
         self._pursue_long_term_goals(npc)
 
     def _redistribute_treasury(self, governance, world_effects):
-        """Kingdom treasuries fund their settlements once per game-day.
+        """Kingdom treasuries fund settlements that are short on gold.
 
-        This closes the fiscal loop: NPC taxes flow to kingdom treasury
-        (handled by governance._collect_taxes), and treasury flows back
-        to settlement stores so guards and workers can be paid.
-        Gold is conserved — it just moves between entities.
+        Only redistributes to settlements below a gold threshold, and
+        caps total redistribution at 10% of treasury to prevent drain.
         """
+        SETTLEMENT_GOLD_THRESHOLD = 50  # only help settlements below this
+        MAX_REDISTRIBUTION_FRACTION = 0.10  # cap at 10% of treasury
+
         for kname, kingdom in governance.kingdoms.items():
             settlements = getattr(kingdom, 'settlements', [])
             if not settlements:
                 continue
-            # Each settlement gets an equal share of a portion of treasury
-            # Keep 40% as strategic reserve, distribute 60%
-            distributable = kingdom.treasury * 0.6
-            if distributable < 1:
+
+            # Cap redistribution at 10% of treasury
+            max_distributable = kingdom.treasury * MAX_REDISTRIBUTION_FRACTION
+            if max_distributable < 1:
                 continue
-            per_settlement = distributable / len(settlements)
-            total_distributed = 0
+
+            # Find settlements that actually need gold
+            needy = []
             for sname in settlements:
                 stores = world_effects.get_stores_ref(sname)
-                share = min(per_settlement, distributable - total_distributed)
+                current_gold = stores.get("gold", 0)
+                if current_gold < SETTLEMENT_GOLD_THRESHOLD:
+                    deficit = SETTLEMENT_GOLD_THRESHOLD - current_gold
+                    needy.append((sname, stores, deficit))
+
+            if not needy:
+                continue
+
+            # Distribute proportionally to deficit, capped
+            total_deficit = sum(d for _, _, d in needy)
+            total_distributed = 0
+            for sname, stores, deficit in needy:
+                share = min(deficit, max_distributable * (deficit / total_deficit))
+                if share <= 0:
+                    continue
+                if total_distributed + share > max_distributable:
+                    share = max_distributable - total_distributed
                 if share <= 0:
                     break
                 stores["gold"] = stores.get("gold", 0) + share

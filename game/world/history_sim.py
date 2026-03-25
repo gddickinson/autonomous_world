@@ -2137,7 +2137,8 @@ class HistorySimulation:
             road_type = {4: "king_road", 3: "paved_road",
                          2: "gravel_road", 1: "dirt_track"}[imp]
 
-            waypoints = self._road_waypoints(x1, y1, x2, y2, rng)
+            from game.world.road_pathfinder import find_road_path
+            waypoints = find_road_path(self, x1, y1, x2, y2)
             roads.append(RoadPlan(
                 start_name=n1, end_name=n2,
                 road_type=road_type, waypoints=waypoints,

@@ -8,6 +8,7 @@ import os
 import random
 import time
 import math
+import itertools
 
 import pygame
 
@@ -23,6 +24,10 @@ from game.core.npc import NPC
 from game.core.items import make_item
 from game.systems import TimeSystem, NotificationSystem
 from game.systems.quests import QuestSystem
+from game.systems.quest_board import QuestBoardManager
+from game.systems.quest_board_init import initialize_quest_boards
+from game.systems.message_board import MessageBoardManager, initialize_message_boards
+from game.systems.main_quest import MainQuestManager
 from game.systems.combat import CombatSystem
 from game.systems.world_manager import WorldManager
 from game.ui.renderer import Renderer
@@ -42,10 +47,18 @@ from game.ai.claude_assistant import ClaudeAssistant
 from game.ai.god_console import GodConsole
 from game.ui.claude_chat import ClaudeChatUI, APIKeyConfigUI
 from game.core.remote_player import RemotePlayer
+from game.systems.difficulty import init_difficulty
+from game.ui.quest_tracker import QuestTracker
+from game.ui.controls_overlay import ControlsOverlay
+from game.ui.llm_console import LLMConsole
+from game.systems.player_roads import PlayerRoadBuilder
+from game.ui.water_render import WaterRipples
 
 
 from game.main_dialog_results import DialogResultsMixin
 from game.main_multiplayer import MultiplayerMixin
+from game.systems.tutorial import TutorialSystem
+from game.audio.sound_system import SoundManager
 
 
 class Game(DialogResultsMixin, MultiplayerMixin):
@@ -72,12 +85,48 @@ class Game(DialogResultsMixin, MultiplayerMixin):
         self.spawn_location = self.config["spawn_location"]
         self.use_chunked = True
 
+        # Character creation — show BEFORE world loads (world gen is slow)
+        # God mode shows god selection instead of character creation
+        self._char_data = None
+        self._god_choice = None
+        skip_chargen = getattr(self.__class__, '_skip_chargen', False)
+        dev_chargen = getattr(self.__class__, '_dev_chargen', False)
+        if self.player_mode == "god" and not skip_chargen:
+            from game.ui.god_selection import show_god_selection
+            god_result = show_god_selection(self.screen, self.clock)
+            if god_result is None:
+                pygame.quit()
+                sys.exit()
+            self._god_choice = god_result.get("god_name", "Verithos")
+            skip_chargen = True
+        if title_result == "new_game" and not skip_chargen:
+            if dev_chargen:
+                from game.ui.char_creation_dev import show_dev_creation
+                result = show_dev_creation(self.screen, self.clock)
+            else:
+                from game.ui.char_creation import show_character_creation
+                result = show_character_creation(self.screen, self.clock)
+            if result is None:
+                pygame.quit()
+                sys.exit()
+            self._char_data = result
+            if dev_chargen and result.get("spawn_location"):
+                self.spawn_location = result["spawn_location"]
+
         self._show_loading("Generating world...", 0.0)
 
         # Core systems — chunked world (uses config dimensions)
         world_w = self.config["world_width"]
         world_h = self.config["world_height"]
         seed = self.config["world_seed"]
+
+        # Apply terrain/settlement style from config to settings flags
+        import game.settings as _settings
+        terrain_style = self.config.get("terrain_style", "volcanic")
+        _settings.USE_NEW_TERRAIN = (terrain_style == "volcanic")
+        settlement_style = self.config.get("settlement_style", "voronoi")
+        _settings.USE_VORONOI_LAYOUT = (settlement_style == "voronoi")
+        _settings.USE_LTP_SETTLEMENTS = (terrain_style == "volcanic")
 
         def _on_progress(text, frac):
             self._show_loading(text, frac)
@@ -91,8 +140,25 @@ class Game(DialogResultsMixin, MultiplayerMixin):
         self.active_renderer = self.renderer  # currently active renderer
         self.view_mode = self.config["default_view"]  # "strategy", "adventure", or "3d"
         self.ui = UI(self.screen)
+        from game.ui.spell_bar import SpellBar
+        self.spell_bar = SpellBar(
+            pygame.font.SysFont("monospace", 12),
+            pygame.font.SysFont("monospace", 16),
+        )
+        from game.ui.targeting import TargetingSystem
+        self.targeting = TargetingSystem()
+        from game.systems.elemental_effects import ElementalEffects
+        self.elemental = ElementalEffects()
+        from game.ui.elemental_renderer import ElementalRenderer
+        self.elemental_renderer = ElementalRenderer()
         self.time_sys = TimeSystem()
         self.quest_sys = QuestSystem()
+        init_difficulty(self.config)
+        self.quest_tracker = QuestTracker()
+        self.controls_overlay = ControlsOverlay()
+        self.llm_console = LLMConsole()
+        self.road_builder = PlayerRoadBuilder()
+        self.water_ripples = WaterRipples()
         self.notifications = NotificationSystem()
         self.world_mgr = WorldManager(self.world)
 
@@ -105,6 +171,31 @@ class Game(DialogResultsMixin, MultiplayerMixin):
             self.quest_sys.generate_quest_for_npc(npc)
             npc.regenerate_dialog()  # rebuild tree so quest option appears
 
+        # Quest boards at taverns
+        self.quest_board_mgr = QuestBoardManager()
+        initialize_quest_boards(self.world, self.quest_board_mgr)
+        # Track active quest board UI state
+        self.quest_board_active = False
+        self.quest_board_settlement = ""
+        self.quest_board_listings = []
+        self.quest_board_selected = 0
+
+        # Message boards at taverns and town halls
+        self.msg_board_mgr = MessageBoardManager()
+        initialize_message_boards(self.world, self.msg_board_mgr)
+        self.msg_board_active = False
+        self.msg_board_settlement = ""
+        self.msg_board_listings = []
+        self.msg_board_selected = 0
+        # Board selection menu (quest board vs message board)
+        self.board_menu_active = False
+        self.board_menu_quest_board = None
+        self.board_menu_msg_board = None
+        self.board_menu_selected = 0
+
+        # Main questline
+        self.main_quest = MainQuestManager()
+
         # LLM
         self._show_loading("Connecting to LLM...", 0.50)
         self.llm = LLMManager()
@@ -115,9 +206,12 @@ class Game(DialogResultsMixin, MultiplayerMixin):
         # Simulation
         self._show_loading("Initializing simulation...", 0.55)
         self.simulation = SimulationManager(self.world_mgr, self.world, self.llm, self.time_sys)
+        # Share quest board manager with simulation for periodic refresh
+        self.simulation._quest_board_mgr = self.quest_board_mgr
 
         # Historical chronicle system
         self.chronicles = ChronicleSystem()
+        self.main_quest.attach_chronicle(self.chronicles)
 
         # Wire climate model into UI for HUD weather display and world map overlay
         if hasattr(self.simulation, 'climate'):
@@ -147,9 +241,68 @@ class Game(DialogResultsMixin, MultiplayerMixin):
             sx, sy = self.world.test_island_spawn
         else:
             sx, sy = self.world.spawn_point
-        self.player = Player(float(sx), float(sy))
+        # Create player with character creation data (if any)
+        # Merge preset (from --wizard etc.) with char creation data
+        cd = self._char_data or {}
+        preset = getattr(self.__class__, '_char_preset', None)
+        if preset:
+            cd = {**cd, **preset}
+        self.player = Player(
+            float(sx), float(sy),
+            char_class=cd.get("char_class", "Fighter"),
+            race=cd.get("race", "Human"),
+            ability_scores=cd.get("ability_scores"),
+        )
         self.player.mode = self.player_mode  # "mortal", "ghost", "god"
         self.player.gold = self.config["starting_gold"]
+
+        # Validate class setup — ensure spellcasters have mana and spells
+        if self.player.is_spellcaster:
+            from game.systems.magic import init_mana, auto_learn_spells_for_class
+            init_mana(self.player)
+            auto_learn_spells_for_class(self.player)
+            if not self.player.known_spells:
+                # Fallback: populate from class spell_list
+                from game.data.dnd import CLASSES
+                cls_data = CLASSES.get(self.player.char_class, {})
+                self.player.known_spells = list(cls_data.get("spell_list", []))[:5]
+        print(f"[INIT] Player created: {self.player.race} {self.player.char_class} "
+              f"(spellcaster={self.player.is_spellcaster}, "
+              f"spells={len(self.player.known_spells)}, "
+              f"abilities={self.player.class_abilities})")
+
+        # Apply dev-mode overrides
+        if cd.get("level") and cd["level"] > 1:
+            for _ in range(cd["level"] - 1):
+                self.player.gain_xp(self.player.xp_to_next)
+        if cd.get("gold") is not None:
+            self.player.gold = cd["gold"]
+        if cd.get("hp") and cd.get("max_hp"):
+            self.player.max_hp = cd["max_hp"]
+            self.player.hp = cd["hp"]
+        if cd.get("god_mode"):
+            self.player.god = True
+            self.player.mode = "god"
+            self.player_mode = "god"
+            self.player.max_hp = 99999
+            self.player.hp = 99999
+            self.player.speed *= 3
+        if cd.get("extra_items"):
+            from game.core.items import make_item
+            for item_name in cd["extra_items"]:
+                try:
+                    self.player.add_item(make_item(item_name))
+                except Exception:
+                    pass
+
+        # Learn all spells in the game (wizard cheat mode)
+        if cd.get("all_spells"):
+            from game.systems.magic import SPELL_REGISTRY, SOUL_SPELLS
+            all_spell_names = list(SPELL_REGISTRY.keys()) + list(SOUL_SPELLS.keys())
+            self.player.known_spells = all_spell_names
+            self.player.is_spellcaster = True
+            self.player.max_mana = 999
+            self.player.mana = 999
 
         # Restore saved player state if a save file exists for this seed
         if title_result == "continue":
@@ -166,22 +319,74 @@ class Game(DialogResultsMixin, MultiplayerMixin):
             self.player.ghost = True
             self.player.speed = PLAYER_SPEED * 2  # ghosts move fast
         elif self.player_mode == "god":
+            god_name = getattr(self, '_god_choice', None) or "Verithos"
             self.player.god = True
+            self.player.race = "Divine"
+            self.player.char_class = god_name
+            self.player.name = god_name
             self.player.hp = 99999
             self.player.max_hp = 99999
             self.player.speed = PLAYER_SPEED * 3
+            self.player.attack_damage = 9999
+            self.player.defense = 999
+            self.player.level = 99
+            for ab in ("strength", "dexterity", "constitution",
+                       "intelligence", "wisdom", "charisma"):
+                self.player.ability_scores[ab] = 30
+            from game.systems.magic import SPELL_REGISTRY, SOUL_SPELLS
+            self.player.known_spells = list(SPELL_REGISTRY.keys()) + list(SOUL_SPELLS.keys())
+            self.player.is_spellcaster = True
+            self.player.max_mana = 999
+            self.player.mana = 999
+            self.player.gold = 99999
+            # Store which god for game systems
+            self.player._god_name = god_name
+            from game.ui.god_selection import GOD_INFO
+            god_info = GOD_INFO.get(god_name, {})
+            self.player._god_sphere = god_info.get("sphere", "unknown")
+            self.player._god_color = god_info.get("aura", (255, 220, 100))
 
         # God Mode UI (tweaker, console, hot-reload are created inside GodModeUI)
         if getattr(self.player, 'god', False):
             from game.ui.god_mode import GodModeUI
             self.god_ui = GodModeUI(self.screen, self)
+            # Divine dashboard and intervention commands
+            from game.ui.god_dashboard import GodDashboard
+            from game.systems.divine_commands import DivineCommands
+            self.god_dashboard = GodDashboard(self)
+            self.divine_commands = DivineCommands()
 
         self.camera.x = self.player.x * TILE_SIZE - SCREEN_WIDTH // 2
         self.camera.y = self.player.y * TILE_SIZE - SCREEN_HEIGHT // 2
 
-        # Minimap
+        # Minimap and renderer caches
         self._show_loading("Building minimap...", 0.85)
         self.renderer.build_minimap(self.world)
+        # Pre-build renderer caches that would otherwise stall the first frame
+        self._show_loading("Building render caches...", 0.90)
+        self.renderer._build_roof_cache()
+        self.renderer._build_building_function_cache(self.world)
+        # Pre-build height map cache for 2.5D building rendering
+        if hasattr(self.world, 'plan'):
+            hm = {}
+            for sp in self.world.plan.settlements:
+                for bld in sp.buildings:
+                    bx, by = bld['x'], bld['y']
+                    bw, bh = bld['w'], bld['h']
+                    bname = bld.get('name', '')
+                    nf = 3 if any(k in bname for k in ('Tower', 'Keep', 'Castle')) \
+                        else 2 if sp.kind in ('city', 'castle') else 1
+                    for dy in range(bh):
+                        for dx in range(bw):
+                            hm[(bx + dx, by + dy)] = nf
+            for loc in self.world.plan.special_locations:
+                if loc.kind == 'temple':
+                    r = loc.radius
+                    for dy in range(-r, r + 1):
+                        for dx in range(-r, r + 1):
+                            if dx * dx + dy * dy <= r * r:
+                                hm[(loc.x + dx, loc.y + dy)] = 1
+            self.renderer._height_map_cache = hm
 
         # FOV
         self.visible_tiles = set()
@@ -201,6 +406,7 @@ class Game(DialogResultsMixin, MultiplayerMixin):
         self.running = True
         self.dead = False
         self.nearby_npc = None
+        self.nearby_creature = None  # intelligent creature available for dialog
         self.location_banner = ""
         self.location_banner_timer = 0.0
         self.current_location = ""
@@ -212,10 +418,16 @@ class Game(DialogResultsMixin, MultiplayerMixin):
         self.auto_play_timer = 0.0
         self.show_minimap = False  # off by default, toggle with N
         self.auto_save_timer = 0.0  # counts up to auto_save_interval
+        self._last_player_level = 1  # audio: track level for level-up sound
+        self._last_player_hp = self.player.max_hp  # audio: track HP for damage sound
 
         # Object highlighting system (J to toggle, K for category picker)
         from game.ui.highlight import HighlightSystem
         self.highlight = HighlightSystem()
+
+        # Contextual help tooltips
+        from game.ui.tooltips import TooltipSystem
+        self.tooltip_sys = TooltipSystem(self.renderer.font_sm)
 
         # Claude AI assistant (God Mode only)
         self.claude_assistant = ClaudeAssistant(self)
@@ -232,11 +444,77 @@ class Game(DialogResultsMixin, MultiplayerMixin):
         self._multiplayer_chat_log = []
         self._init_multiplayer()
 
+        # Phase 6: Player progression systems
+        from game.systems.titles import initialize_title_tracker
+        initialize_title_tracker(self.player)
+        from game.ui.panel_combat_log import CombatLogPanel
+        self.combat_log_panel = CombatLogPanel()
+        from game.ui.panel_settlement import SettlementOverviewPanel
+        self.settlement_panel = SettlementOverviewPanel()
+        from game.ui.panel_relationships import RelationshipPanel
+        self.relationship_panel = RelationshipPanel()
+        from game.systems.letter_system import LetterSystem
+        self.letter_system = LetterSystem()
+        from game.systems.fast_travel import FastTravelUI
+        self.fast_travel_ui = FastTravelUI()
+        self._title_check_timer = 0.0
+
+        # Crafting UI and Skill Tree (Phase 6)
+        from game.systems.crafting_ui import CraftingUI
+        self.crafting_ui = CraftingUI()
+        from game.systems.skill_tree import SkillTreeUI, init_player_skill_tree
+        self.skill_tree_ui = SkillTreeUI()
+        init_player_skill_tree(self.player)
+
+        # Audio system — procedural sound effects
+        self.sound = SoundManager()
+
         self._show_loading("Ready!", 1.0)
         print("[INIT] All systems initialized, entering game loop...")
 
         # Reveal start
         self.world.reveal_around(int(self.player.x), int(self.player.y), 12)
+
+        # Tutorial system — activate for mortal players on test island
+        self.tutorial = None
+        if self.spawn_location == "test_island" and self.player_mode == "mortal":
+            self.tutorial = TutorialSystem(self.player)
+
+        # Starting quest — guide new mortal/ghost players to nearest settlement
+        if self.player_mode != "god":
+            from game.systems.starting_quest import create_starting_quest
+            _sq_name = create_starting_quest(self.world, self.quest_sys)
+            print(f"[QUEST] Starting quest target: {_sq_name}, "
+                  f"active quests: {len(self.quest_sys.active_quests)}")
+            if _sq_name:
+                self.notifications.add("New quest: Find Civilization", 5.0, YELLOW)
+                self.notifications.add(
+                    f"Head toward {_sq_name} to find people.", 6.0, (180, 200, 140))
+                # Start main questline chained from the starting quest
+                self.main_quest.start(_sq_name)
+                self.main_quest.attach_chronicle(self.chronicles)
+            else:
+                # No settlement found — create a fallback exploration quest
+                print("[QUEST] WARNING: No settlement found for starting quest. "
+                      "Creating fallback quest.")
+                from game.systems.quests import Quest
+                fallback_quest = Quest(
+                    title="Explore the World",
+                    description=(
+                        "You've awakened at an ancient temple. Explore the "
+                        "surrounding area and find signs of civilization."
+                    ),
+                    kind="investigate",
+                    target="settlement",
+                    target_count=1,
+                    reward_gold=10,
+                    reward_xp=25,
+                    difficulty="easy",
+                    stages=1,
+                )
+                fallback_quest.giver_name = "Temple of Awakening"
+                self.quest_sys.accept_quest(fallback_quest)
+                self.notifications.add("New quest: Explore the World", 5.0, YELLOW)
 
         if self.spawn_location == "test_island":
             self.notifications.add("Welcome to the Test Island!", 5.0, YELLOW)
@@ -253,6 +531,7 @@ class Game(DialogResultsMixin, MultiplayerMixin):
                 self.notifications.add("[K] Set API key to enable Claude AI assistant", 6.0, (200, 180, 100))
         else:
             self.notifications.add("WASD:Move  Space:Fight  E:Interact  R:Recruit  T:Talk  C:Character", 7.0, (200, 200, 210))
+            self.notifications.add("B:Settlement  L:CombatLog  Y:FastTravel  H:Chronicle", 7.0, (180, 200, 200))
         if self.llm.enabled:
             self.notifications.add(f"LLM active: {self.llm.provider_name}", 4.0, GREEN)
 
@@ -480,6 +759,44 @@ class Game(DialogResultsMixin, MultiplayerMixin):
             if desc:
                 self.notifications.add(desc, 4.0, (200, 200, 100))
 
+    def _draw_conversation_snippets(self, dt: float):
+        """Draw overheard NPC conversation snippets as floating text."""
+        snippets = self.simulation._snippet_manager.active_snippets
+        if not snippets:
+            return
+        if not hasattr(self, '_snippet_font'):
+            self._snippet_font = pygame.font.SysFont("monospace", 13)
+        cam = self.camera
+        ts = cam.tile_size if hasattr(cam, 'tile_size') else TILE_SIZE
+        for s in snippets:
+            # Convert world to screen coordinates
+            sx = (s.x - cam.x) * ts + SCREEN_WIDTH // 2
+            sy = (s.y - cam.y) * ts + SCREEN_HEIGHT // 2
+            # Float upward slowly
+            sy -= s.age * 12
+            # Skip if off screen
+            if sx < -200 or sx > SCREEN_WIDTH + 200:
+                continue
+            if sy < -50 or sy > SCREEN_HEIGHT + 50:
+                continue
+            # Fade out in last second
+            alpha = 255
+            if s.age > s.max_age - 1.0:
+                alpha = max(0, int(255 * (s.max_age - s.age)))
+            # Render speaker name and text
+            label = f"{s.speaker_name}: \"{s.text}\""
+            if len(label) > 60:
+                label = label[:57] + "...\""
+            text_surf = self._snippet_font.render(label, True, (240, 230, 200))
+            if alpha < 255:
+                text_surf.set_alpha(alpha)
+            # Background box for readability
+            tw, th = text_surf.get_size()
+            bg = pygame.Surface((tw + 8, th + 4), pygame.SRCALPHA)
+            bg.fill((0, 0, 0, min(160, alpha)))
+            self.screen.blit(bg, (int(sx) - tw // 2 - 4, int(sy) - th // 2 - 2))
+            self.screen.blit(text_surf, (int(sx) - tw // 2, int(sy) - th // 2))
+
     def _draw_remote_players(self):
         """Draw all remote players on the overworld."""
         tile_size = self.camera.tile_size if hasattr(self.camera, 'tile_size') else TILE_SIZE
@@ -588,6 +905,19 @@ class Game(DialogResultsMixin, MultiplayerMixin):
                     self.api_key_config.show()
                 continue
 
+            # LLM console intercepts all input when visible
+            if self.llm_console.visible:
+                if event.type == pygame.KEYDOWN:
+                    self.llm_console.handle_event(event)
+                continue
+
+            # Toggle LLM console with backtick (non-god mode)
+            if (event.type == pygame.KEYDOWN
+                    and event.key == pygame.K_BACKQUOTE
+                    and not getattr(self.player, 'god', False)):
+                self.llm_console.toggle()
+                continue
+
             # God mode: Python console intercepts all input when visible
             if (hasattr(self, 'god_ui') and getattr(self.player, 'god', False)
                     and self.god_ui.python_console.visible
@@ -600,14 +930,14 @@ class Game(DialogResultsMixin, MultiplayerMixin):
                     event.key, event.unicode, pygame.key.get_mods())
                 continue
 
-            # Open Claude chat / API key config (god mode only)
-            # F9 or K for Claude chat, K for API key config
+            # Open Claude chat (god mode only; F10)
+            # K now opens divine kingdom commands (API key moved to Shift+K)
             if (event.type == pygame.KEYDOWN
                     and getattr(self.player, 'god', False)):
-                if event.key == pygame.K_F9:
+                if event.key == pygame.K_F10:
                     self.claude_chat.toggle()
                     continue
-                if event.key == pygame.K_k:
+                if event.key == pygame.K_k and (pygame.key.get_mods() & pygame.KMOD_SHIFT):
                     self.api_key_config.show()
                     continue
 
@@ -618,18 +948,107 @@ class Game(DialogResultsMixin, MultiplayerMixin):
                 elif result == "close":
                     actions.check_npc_quest(self, self.ui.dialog_npc)
                 continue
+            # Spell targeting: intercept mouse clicks when targeting active
+            if event.type == pygame.MOUSEBUTTONDOWN and self.targeting.is_active():
+                if event.button == 1:  # left click = confirm target
+                    from game.systems.spell_targeting_bridge import (
+                        execute_targeted_spell, execute_targeted_throw)
+                    from game.ui.targeting import SPELL_TARGET, THROW_TARGET
+                    result = self.targeting.handle_click(
+                        event.pos[0], event.pos[1], self.camera,
+                        self.world, self.world_mgr.creatures,
+                        self.world_mgr.npcs, self.player)
+                    if self.targeting.state == SPELL_TARGET:
+                        execute_targeted_spell(
+                            self, self.targeting.spell_name, result)
+                    elif self.targeting.state == THROW_TARGET:
+                        execute_targeted_throw(
+                            self, self.targeting.throw_item, result)
+                    self.targeting.cancel()
+                    continue
+                elif event.button == 3:  # right click = cancel
+                    self.targeting.cancel()
+                    self.notifications.add("Targeting cancelled.", 1.0,
+                                           (180, 180, 200))
+                    continue
+            # Road building mode: left click places road tiles
+            if (event.type == pygame.MOUSEBUTTONDOWN and event.button == 1
+                    and self.road_builder.active):
+                self.road_builder.handle_click(
+                    event.pos[0], event.pos[1], self)
+                continue
+
             if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                mods = pygame.key.get_mods()
+                shift_held = mods & pygame.KMOD_SHIFT
+                ctrl_held = mods & pygame.KMOD_CTRL
+
+                # Divine commands: Ctrl+click = smite, Shift+click = bless
+                if hasattr(self, 'divine_commands') and getattr(self.player, 'god', False):
+                    # Dashboard click handling
+                    if self.god_dashboard.visible:
+                        if self.god_dashboard.handle_click(event.pos[0], event.pos[1]):
+                            continue
+                    # Ctrl+click = smite
+                    if ctrl_held:
+                        self.divine_commands.handle_click(
+                            event.pos[0], event.pos[1], event.button,
+                            mods, self.camera, self)
+                        continue
+                    # Shift+click = bless (divine version)
+                    if shift_held:
+                        self.divine_commands.handle_click(
+                            event.pos[0], event.pos[1], event.button,
+                            mods, self.camera, self)
+                        continue
+
+                # God UI inspect: SHIFT+click (or click when no entity under cursor)
                 if hasattr(self, 'god_ui') and getattr(self.player, 'god', False):
-                    # Try panel drag first, then regular click
-                    if not self.god_ui.handle_mousedown(event.pos[0], event.pos[1], event.button):
-                        self.god_ui.handle_click(event.pos[0], event.pos[1],
-                                                 event.button, self.camera,
-                                                 self.world)
+                    if shift_held:
+                        # SHIFT+click always opens god inspect
+                        if not self.god_ui.handle_mousedown(event.pos[0], event.pos[1], event.button):
+                            self.god_ui.handle_click(event.pos[0], event.pos[1],
+                                                     event.button, self.camera,
+                                                     self.world)
+                        continue
+                    # Panel drag still works without shift
+                    self.god_ui.handle_mousedown(event.pos[0], event.pos[1], event.button)
+
                 if self.ui.show_world_map:
                     self.ui.world_map_view.handle_click(
                         event.pos[0], event.pos[1], self.world, self.player)
+                # Combat targeting: left-click on entity to set as target
+                elif not self.ui.dialog_active and not self.ui.paused:
+                    entity = self.targeting.get_hover_entity(
+                        event.pos[0], event.pos[1], self.camera,
+                        self.world_mgr.creatures, self.world_mgr.npcs)
+                    if entity and getattr(entity, 'alive', False):
+                        msg = self.combat.set_player_target(entity)
+                        if msg:
+                            self.notifications.add(msg, 2.0, (220, 80, 80))
+                            self.attack_flash_timer = 0.1
+                    elif hasattr(self, 'god_ui') and getattr(self.player, 'god', False):
+                        # No entity under cursor — fall through to god inspect
+                        self.god_ui.handle_click(event.pos[0], event.pos[1],
+                                                 event.button, self.camera,
+                                                 self.world)
+            # Right-click: deselect combat target
+            if event.type == pygame.MOUSEBUTTONDOWN and event.button == 3:
+                if not self.targeting.is_active():
+                    if self.combat.active and self.combat.player_state.target:
+                        self.combat.player_state.target = None
+                        self.notifications.add("Target cleared.", 1.0, (180, 180, 200))
+                        if not any(c.alive and self.player.dist_to(c) < 6
+                                   for c in self.world_mgr.creatures):
+                            self.combat.end_combat()
             if event.type == pygame.MOUSEWHEEL:
-                if self.ui.show_world_map:
+                if self.combat_log_panel.is_showing:
+                    self.combat_log_panel.scroll(event.y)
+                elif self.relationship_panel.visible:
+                    self.relationship_panel.scroll(-event.y)
+                elif self.settlement_panel.visible:
+                    self.settlement_panel.scroll(event.y)
+                elif self.ui.show_world_map:
                     self.ui.world_map_view.handle_scroll(event.y)
             if event.type == pygame.KEYDOWN:
                 # F12 screenshot works from any screen, even modals
@@ -644,6 +1063,13 @@ class Game(DialogResultsMixin, MultiplayerMixin):
                                          pygame.key.get_mods())
             # Mouse drag support for parameter tweaker and god panel
             if event.type == pygame.MOUSEMOTION:
+                self._mouse_pos = event.pos
+                # Update targeting system mouse position
+                if self.targeting.is_active():
+                    self.targeting.update_mouse(event.pos[0], event.pos[1])
+                self.targeting.get_hover_entity(
+                    event.pos[0], event.pos[1], self.camera,
+                    self.world_mgr.creatures, self.world_mgr.npcs)
                 if (hasattr(self, 'god_ui')
                         and getattr(self.player, 'god', False)):
                     self.god_ui.handle_mousemove(event.pos[0], event.pos[1])
@@ -655,10 +1081,66 @@ class Game(DialogResultsMixin, MultiplayerMixin):
                     self.god_ui.tweaker.handle_mouse_up()
 
     def _handle_keydown(self, key, unicode_char="", mods=0):
+        # Board menu (choose quest board or message board)
+        if getattr(self, 'board_menu_active', False):
+            self._handle_board_menu_input(key)
+            return
+
+        # Quest board input handling
+        if getattr(self, 'quest_board_active', False):
+            self._handle_quest_board_input(key)
+            return
+
+        # Message board input handling
+        if getattr(self, 'msg_board_active', False):
+            self._handle_msg_board_input(key)
+            return
+
         # Panel-specific input
         if self.ui.dialog_active:
+            self.sound.play("menu_click")
             result = self.ui.handle_dialog_input(key)
             npc = self.ui.dialog_npc
+
+            # Creature-specific dialog results
+            from game.core.creature import Creature
+            is_creature = isinstance(npc, Creature)
+            if is_creature and result:
+                if result == "fight":
+                    self.ui.dialog_active = False
+                    npc.state = "chasing"
+                    npc.target = self.player
+                    kind_name = npc.kind.replace('_', ' ').title()
+                    self.notifications.add(
+                        f"The {kind_name} attacks!", 2.0, RED)
+                    return
+                elif result in ("close", "leave", "flee", "goodbye"):
+                    self.ui.dialog_active = False
+                    return
+                elif result == "paid":
+                    cost = 30 if "bandit" in npc.kind else 20
+                    if self.player.gold >= cost:
+                        self.player.gold -= cost
+                        self.notifications.add(
+                            f"Paid {cost} gold toll.", 2.0, YELLOW)
+                    else:
+                        self.notifications.add("Not enough gold!", 1.5, RED)
+                elif result == "buy_potion":
+                    if self.player.gold >= 10:
+                        self.player.gold -= 10
+                        from game.core.items import make_item
+                        potion = make_item("Health Potion")
+                        if potion:
+                            self.player.add_item(potion)
+                        self.notifications.add(
+                            "Bought a health potion for 10 gold.", 2.0, GREEN)
+                    else:
+                        self.notifications.add("Not enough gold!", 1.5, RED)
+                elif result == "take_tribute":
+                    self.player.gold += 5
+                    self.notifications.add("Took 5 gold tribute.", 2.0, YELLOW)
+                # Other creature dialog results just navigate normally
+                return
 
             # Generate memories from every meaningful dialog interaction
             if npc and result and result not in ("close", "greeting", "free_text", "back"):
@@ -701,6 +1183,14 @@ class Game(DialogResultsMixin, MultiplayerMixin):
             if result:
                 self.notifications.add(result, 2.0)
             return
+        # Crafting UI panel
+        if self.crafting_ui.active:
+            self.crafting_ui.handle_key(key, self.player)
+            return
+        # Skill tree panel
+        if self.skill_tree_ui.active:
+            self.skill_tree_ui.handle_key(key, self.player)
+            return
         if self.ui.show_inventory:
             result = self.ui.handle_inventory_input(key, self.player, self.world_mgr)
             if result:
@@ -724,6 +1214,14 @@ class Game(DialogResultsMixin, MultiplayerMixin):
         if self.ui.show_chronicle:
             self.ui.handle_chronicle_input(key)
             return
+        if self.relationship_panel.visible:
+            if key in (pygame.K_w, pygame.K_UP):
+                self.relationship_panel.scroll(-1)
+            elif key in (pygame.K_s, pygame.K_DOWN):
+                self.relationship_panel.scroll(1)
+            elif key == pygame.K_ESCAPE or (key == pygame.K_r and (mods & pygame.KMOD_SHIFT)):
+                self.relationship_panel.visible = False
+            return
         if self.ui.show_planet_view:
             self.ui.handle_planet_view_input(key)
             return
@@ -741,7 +1239,37 @@ class Game(DialogResultsMixin, MultiplayerMixin):
             if key == pygame.K_r:
                 self._respawn()
             return
+        # Fast travel UI active — intercept navigation keys
+        if self.fast_travel_ui.active:
+            if key == pygame.K_ESCAPE:
+                self.fast_travel_ui.close()
+                return
+            elif key in (pygame.K_w, pygame.K_UP):
+                self.fast_travel_ui.navigate(-1)
+                return
+            elif key in (pygame.K_s, pygame.K_DOWN):
+                self.fast_travel_ui.navigate(1)
+                return
+            elif key in (pygame.K_RETURN, pygame.K_e):
+                self._execute_fast_travel()
+                return
+            return  # block other keys while fast travel is open
+
         if key == pygame.K_ESCAPE:
+            if self.targeting.is_active():
+                self.targeting.cancel()
+                self.notifications.add("Targeting cancelled.", 1.0,
+                                       (180, 180, 200))
+                return
+            if self.settlement_panel.visible:
+                self.settlement_panel.visible = False
+                return
+            if self.combat_log_panel.visible:
+                self.combat_log_panel.visible = False
+                return
+            if self.relationship_panel.visible:
+                self.relationship_panel.visible = False
+                return
             if self.ui.any_panel_open:
                 self.ui.close_all()
             elif self.combat.active:
@@ -751,6 +1279,12 @@ class Game(DialogResultsMixin, MultiplayerMixin):
                 self._open_pause_menu()
             return
         if self.ui.paused:
+            return
+
+        # Controls overlay (? = Shift+/) — checked before other keys
+        _co_evt = pygame.event.Event(
+            pygame.KEYDOWN, key=key, mod=pygame.key.get_mods())
+        if self.controls_overlay.handle_event(_co_evt):
             return
 
         # 3D camera controls (arrow keys, +/-, [/])
@@ -770,14 +1304,66 @@ class Game(DialogResultsMixin, MultiplayerMixin):
                 cam_handler()
                 return
 
-        # God mode controls (intercept F1-F7, 1-5, G, ~ before normal bindings)
-        if hasattr(self, 'god_ui') and getattr(self.player, 'god', False):
+        # Divine commands & dashboard (god mode): intercept before other handlers
+        if hasattr(self, 'divine_commands') and getattr(self.player, 'god', False):
+            dc = self.divine_commands
+            # Dashboard toggle (TAB)
+            if key == pygame.K_TAB:
+                self.god_dashboard.toggle()
+                return
+            # Dashboard handles keys when visible
+            if self.god_dashboard.visible:
+                if self.god_dashboard.handle_key(key):
+                    return
+            # Divine command menus and keys (G, K, N, [, ], P, .)
+            if dc.menu.active_menu:
+                if dc.handle_key(key, mods, self):
+                    return
+            elif key in (pygame.K_LEFTBRACKET, pygame.K_RIGHTBRACKET,
+                         pygame.K_PERIOD):
+                if dc.handle_key(key, mods, self):
+                    return
+
+        # God mode panel open: god UI gets number keys for tool switching
+        # God mode panel closed: spell bar gets number keys for casting
+        god_panel_open = (hasattr(self, 'god_ui')
+                          and getattr(self.player, 'god', False)
+                          and self.god_ui.panel_visible)
+
+        if god_panel_open:
+            # God panel is open — god UI handles keys first
             if self.god_ui.handle_key(key, unicode_char, mods):
                 return
+            if self.spell_bar.handle_key(key, self):
+                return
+        else:
+            # God panel closed — spell bar handles keys first
+            if self.spell_bar.handle_key(key, self):
+                return
+            if hasattr(self, 'god_ui') and getattr(self.player, 'god', False):
+                if self.god_ui.handle_key(key, unicode_char, mods):
+                    return
+
+        # Shift+J: Road building mode (before highlight so J alone = highlight)
+        if key == pygame.K_j and (mods & pygame.KMOD_SHIFT):
+            self.road_builder.toggle(self)
+            return
 
         # Object highlighting (J/K keys)
         if hasattr(self, 'highlight') and self.highlight.handle_key(key):
             return
+
+        # Shift+R: Relationship panel (before action_map so R alone = recruit)
+        if key == pygame.K_r and (mods & pygame.KMOD_SHIFT):
+            self.relationship_panel.toggle()
+            return
+
+        # Divine commands intercept G, K, N, P in god mode before action_map
+        if hasattr(self, 'divine_commands') and getattr(self.player, 'god', False):
+            dc = self.divine_commands
+            if key in (pygame.K_g, pygame.K_k, pygame.K_n, pygame.K_p):
+                if dc.handle_key(key, mods, self):
+                    return
 
         # Game controls
         action_map = {
@@ -803,9 +1389,23 @@ class Game(DialogResultsMixin, MultiplayerMixin):
             pygame.K_r: lambda: self._recruit_companion(),
             pygame.K_TAB: lambda: self._cycle_nearby_npc(),
             pygame.K_z: lambda: self._toggle_interior_zoom(),
+            pygame.K_F6: lambda: self._cycle_overlay_mode(),
+            pygame.K_F7: lambda: self.tutorial.skip() if self.tutorial else None,
+            pygame.K_b: lambda: self.settlement_panel.toggle(),
+            pygame.K_l: lambda: self.combat_log_panel.toggle(),
+            pygame.K_y: lambda: self._open_fast_travel(),
+            pygame.K_u: lambda: self.crafting_ui.toggle(),
+            pygame.K_o: lambda: self.skill_tree_ui.toggle(),
+            pygame.K_F8: lambda: self._toggle_sound_mute(),
+            pygame.K_F9: lambda: self._toggle_music_mute(),
         }
         handler = action_map.get(key)
         if handler:
+            # Audio: click sound for UI panel toggles
+            _ui_keys = {pygame.K_i, pygame.K_c, pygame.K_q, pygame.K_h,
+                        pygame.K_b, pygame.K_l, pygame.K_u, pygame.K_o}
+            if key in _ui_keys:
+                self.sound.play("menu_click")
             handler()
 
     def _draw_combat_ui(self):  # noqa: C901
@@ -949,6 +1549,47 @@ class Game(DialogResultsMixin, MultiplayerMixin):
             pygame.draw.circle(self.screen, YELLOW, (int(sx), int(sy)), 18, 2)
 
     # Old turn-based combat handler removed - combat is now real-time
+
+    def _cycle_overlay_mode(self):
+        """Cycle entity overlay display: all -> minimal -> off -> all."""
+        import game.settings as _s
+        mode = getattr(self, '_overlay_mode', 0)
+        mode = (mode + 1) % 3
+        self._overlay_mode = mode
+
+        if mode == 1:
+            # Minimal: names + quest markers only
+            _s.SHOW_NPC_NAMES = True
+            _s.SHOW_NPC_ACTIONS = False
+            _s.SHOW_NPC_STATUS = False
+            _s.SHOW_NPC_CARGO = False
+            _s.SHOW_SPEECH_BUBBLES = True
+            _s.SHOW_QUEST_MARKERS = True
+            _s.SHOW_CREATURE_LABELS = False
+            _s.SHOW_NPC_CONVERSATIONS = False
+            self.notifications.add("Overlays: MINIMAL (F6 to cycle)", 2.0, (180, 180, 220))
+        elif mode == 2:
+            # Off
+            _s.SHOW_NPC_NAMES = False
+            _s.SHOW_NPC_ACTIONS = False
+            _s.SHOW_NPC_STATUS = False
+            _s.SHOW_NPC_CARGO = False
+            _s.SHOW_SPEECH_BUBBLES = False
+            _s.SHOW_QUEST_MARKERS = False
+            _s.SHOW_CREATURE_LABELS = False
+            _s.SHOW_NPC_CONVERSATIONS = False
+            self.notifications.add("Overlays: OFF (F6 to cycle)", 2.0, (180, 180, 220))
+        else:
+            # All on
+            _s.SHOW_NPC_NAMES = True
+            _s.SHOW_NPC_ACTIONS = True
+            _s.SHOW_NPC_STATUS = True
+            _s.SHOW_NPC_CARGO = True
+            _s.SHOW_SPEECH_BUBBLES = True
+            _s.SHOW_QUEST_MARKERS = True
+            _s.SHOW_CREATURE_LABELS = True
+            _s.SHOW_NPC_CONVERSATIONS = True
+            self.notifications.add("Overlays: ALL (F6 to cycle)", 2.0, (180, 180, 220))
 
     def _toggle_view_mode(self):
         """Cycle through view modes: strategy -> adventure -> 3D -> strategy."""
@@ -1099,6 +1740,61 @@ class Game(DialogResultsMixin, MultiplayerMixin):
             self.ui.world_map_view.open(self.player.x, self.player.y)
             self.ui.show_world_map = True
 
+    def _open_fast_travel(self):
+        """Open fast travel menu if player is on a road tile."""
+        from game.systems.fast_travel import is_on_road, get_reachable_settlements
+        px, py = int(self.player.x), int(self.player.y)
+        if not is_on_road(self.world, px, py):
+            self.notifications.add("Stand on a road to fast travel. [Y]", 3.0, ORANGE)
+            return
+        # Get visited settlements from title tracker
+        visited = set()
+        if hasattr(self.player, 'title_tracker'):
+            visited = self.player.title_tracker.settlements_visited
+        destinations = get_reachable_settlements(
+            self.world, self.player.x, self.player.y, visited)
+        if not destinations:
+            self.notifications.add("No visited settlements reachable by road.", 3.0, ORANGE)
+            return
+        self.fast_travel_ui.open(destinations)
+
+    def _execute_fast_travel(self):
+        """Execute the selected fast travel destination."""
+        dest = self.fast_travel_ui.get_selected()
+        if not dest:
+            self.fast_travel_ui.close()
+            return
+        from game.systems.fast_travel import check_random_encounter, get_encounter_creatures
+        self.fast_travel_ui.close()
+        # Advance game time
+        travel_minutes = dest["travel_minutes"]
+        time_seconds = travel_minutes * 60  # game seconds
+        self.time_sys.time += time_seconds
+        # Random encounter check
+        if check_random_encounter():
+            # Spawn hostile creatures near destination
+            from game.core.creature import Creature
+            creatures = get_encounter_creatures(self.player.level)
+            self.notifications.add("Ambushed during travel!", 4.0, RED)
+            for cr_data in creatures:
+                kind = cr_data["kind"]
+                ox = dest["x"] + random.randint(-3, 3)
+                oy = dest["y"] + random.randint(-3, 3)
+                cr = Creature(float(ox), float(oy), kind)
+                self.world_mgr.creatures.append(cr)
+            self.combat_log_panel.add_message(
+                f"Ambushed by {len(creatures)} creatures during travel!")
+        # Teleport player
+        self.player.x = float(dest["x"])
+        self.player.y = float(dest["y"])
+        self.camera.update(self.player.x, self.player.y)
+        self.world.reveal_around(dest["x"], dest["y"], 12)
+        self.notifications.add(
+            f"Arrived at {dest['name']} ({travel_minutes:.0f} min travel).",
+            4.0, GREEN)
+        self.combat_log_panel.add_message(
+            f"Fast traveled to {dest['name']}")
+
     def _open_pause_menu(self):
         """Open the in-game pause menu with options."""
         self.ui.paused = True
@@ -1163,6 +1859,242 @@ class Game(DialogResultsMixin, MultiplayerMixin):
         else:
             self.notifications.add("AUTO-PLAY OFF - You have control", 3.0, GREEN)
 
+    def _toggle_sound_mute(self):
+        enabled = self.sound.toggle_sounds()
+        if enabled:
+            self.notifications.add("Sounds: ON (F8)", 2.0, GREEN)
+        else:
+            self.notifications.add("Sounds: OFF (F8)", 2.0, GRAY)
+
+    def _toggle_music_mute(self):
+        enabled = self.sound.toggle_music()
+        if enabled:
+            self.notifications.add("Music: ON (F9)", 2.0, GREEN)
+        else:
+            self.notifications.add("Music: OFF (F9)", 2.0, GRAY)
+
+    def _handle_quest_board_input(self, key):
+        """Handle keyboard input while quest board panel is open."""
+        listings = self.quest_board_listings
+        if not listings:
+            self.quest_board_active = False
+            return
+
+        if key == pygame.K_UP or key == pygame.K_w:
+            self.quest_board_selected = max(0, self.quest_board_selected - 1)
+        elif key == pygame.K_DOWN or key == pygame.K_s:
+            self.quest_board_selected = min(len(listings) - 1,
+                                            self.quest_board_selected + 1)
+        elif key == pygame.K_RETURN or key == pygame.K_e:
+            # Accept selected quest
+            idx = listings[self.quest_board_selected]["index"]
+            quest = self.quest_board_mgr.accept_quest(
+                self.quest_board_settlement, idx, self.quest_sys)
+            if quest:
+                self.notifications.add(
+                    f"Quest accepted: {quest.title}", 4.0, YELLOW)
+                self.quest_board_active = False
+            else:
+                self.notifications.add(
+                    "Quest log full! (max 10)", 3.0, RED)
+        elif key == pygame.K_ESCAPE or key == pygame.K_q:
+            self.quest_board_active = False
+
+    def _draw_quest_board(self):
+        """Draw the quest board panel overlay."""
+        listings = self.quest_board_listings
+        if not listings:
+            return
+
+        screen = self.screen
+        sw, sh = screen.get_size()
+
+        # Panel dimensions
+        pw, ph = min(500, sw - 40), min(420, sh - 80)
+        px = (sw - pw) // 2
+        py = (sh - ph) // 2
+
+        # Background
+        panel_surf = pygame.Surface((pw, ph), pygame.SRCALPHA)
+        panel_surf.fill((20, 15, 10, 230))
+        screen.blit(panel_surf, (px, py))
+
+        # Border
+        pygame.draw.rect(screen, (160, 130, 80), (px, py, pw, ph), 2)
+
+        # Title
+        title_font = pygame.font.SysFont("monospace", 18, bold=True)
+        body_font = pygame.font.SysFont("monospace", 13)
+        small_font = pygame.font.SysFont("monospace", 11)
+
+        title = title_font.render(
+            f"Quest Board - {self.quest_board_settlement}", True,
+            (220, 200, 140))
+        screen.blit(title, (px + 10, py + 8))
+
+        # Separator
+        pygame.draw.line(screen, (120, 100, 60),
+                         (px + 10, py + 32), (px + pw - 10, py + 32))
+
+        # Quest listings
+        y_off = py + 40
+        for i, listing in enumerate(listings):
+            selected = (i == self.quest_board_selected)
+            bg_color = (60, 50, 30, 180) if selected else (30, 25, 15, 100)
+
+            entry_h = 70
+            entry_surf = pygame.Surface((pw - 20, entry_h), pygame.SRCALPHA)
+            entry_surf.fill(bg_color)
+            screen.blit(entry_surf, (px + 10, y_off))
+
+            if selected:
+                pygame.draw.rect(screen, (200, 170, 80),
+                                 (px + 10, y_off, pw - 20, entry_h), 1)
+
+            # Quest title
+            color = (255, 220, 120) if selected else (200, 190, 150)
+            t = body_font.render(listing["title"], True, color)
+            screen.blit(t, (px + 16, y_off + 4))
+
+            # Type and difficulty
+            kind_colors = {
+                "kill": (200, 80, 80), "fetch": (80, 180, 80),
+                "deliver": (80, 140, 220), "escort": (200, 160, 60),
+                "investigate": (160, 100, 200),
+            }
+            kind_color = kind_colors.get(listing["kind"], (180, 180, 180))
+            kind_text = listing["kind"].upper()
+            diff_text = listing["difficulty"].upper()
+            info = small_font.render(
+                f"[{kind_text}] [{diff_text}]", True, kind_color)
+            screen.blit(info, (px + 16, y_off + 22))
+
+            # Description (truncated)
+            desc = listing["description"]
+            if len(desc) > 60:
+                desc = desc[:57] + "..."
+            d = small_font.render(desc, True, (170, 170, 160))
+            screen.blit(d, (px + 16, y_off + 38))
+
+            # Rewards
+            reward_text = f"Reward: {listing['reward_gold']}g, {listing['reward_xp']} XP"
+            r = small_font.render(reward_text, True, (220, 200, 80))
+            screen.blit(r, (px + 16, y_off + 52))
+
+            y_off += entry_h + 4
+
+        # Instructions
+        help_y = py + ph - 22
+        help_text = small_font.render(
+            "[W/S] Navigate  [E/Enter] Accept  [Esc] Close", True,
+            (150, 140, 110))
+        screen.blit(help_text, (px + 10, help_y))
+
+    def _handle_board_menu_input(self, key):
+        """Handle input for quest-board / message-board selection menu."""
+        if key == pygame.K_1:
+            self.board_menu_active = False
+            from game.actions import _open_quest_board
+            _open_quest_board(self, self.board_menu_quest_board)
+        elif key == pygame.K_2:
+            self.board_menu_active = False
+            from game.actions import _open_message_board
+            _open_message_board(self, self.board_menu_msg_board)
+        elif key == pygame.K_ESCAPE or key == pygame.K_q:
+            self.board_menu_active = False
+
+    def _handle_msg_board_input(self, key):
+        """Handle keyboard input while message board panel is open."""
+        listings = self.msg_board_listings
+        if not listings:
+            self.msg_board_active = False
+            return
+
+        if key == pygame.K_UP or key == pygame.K_w:
+            self.msg_board_selected = max(0, self.msg_board_selected - 1)
+        elif key == pygame.K_DOWN or key == pygame.K_s:
+            self.msg_board_selected = min(len(listings) - 1,
+                                          self.msg_board_selected + 1)
+        elif key == pygame.K_ESCAPE or key == pygame.K_q:
+            self.msg_board_active = False
+
+    def _draw_message_board(self):
+        """Draw the message board panel overlay."""
+        listings = self.msg_board_listings
+        if not listings:
+            return
+
+        screen = self.screen
+        sw, sh = screen.get_size()
+
+        pw, ph = min(520, sw - 40), min(460, sh - 80)
+        px = (sw - pw) // 2
+        py_top = (sh - ph) // 2
+
+        # Background
+        panel_surf = pygame.Surface((pw, ph), pygame.SRCALPHA)
+        panel_surf.fill((15, 18, 28, 230))
+        screen.blit(panel_surf, (px, py_top))
+
+        # Border
+        pygame.draw.rect(screen, (100, 120, 180), (px, py_top, pw, ph), 2)
+
+        title_font = pygame.font.SysFont("monospace", 18, bold=True)
+        body_font = pygame.font.SysFont("monospace", 13)
+        small_font = pygame.font.SysFont("monospace", 11)
+
+        title = title_font.render(
+            f"Message Board - {self.msg_board_settlement}", True,
+            (160, 170, 220))
+        screen.blit(title, (px + 10, py_top + 8))
+
+        pygame.draw.line(screen, (80, 90, 140),
+                         (px + 10, py_top + 32),
+                         (px + pw - 10, py_top + 32))
+
+        y_off = py_top + 40
+        for i, listing in enumerate(listings):
+            selected = (i == self.msg_board_selected)
+            bg_color = (40, 45, 65, 180) if selected else (25, 28, 40, 100)
+
+            entry_h = 62
+            entry_surf = pygame.Surface((pw - 20, entry_h), pygame.SRCALPHA)
+            entry_surf.fill(bg_color)
+            screen.blit(entry_surf, (px + 10, y_off))
+
+            if selected:
+                pygame.draw.rect(screen, (140, 160, 220),
+                                 (px + 10, y_off, pw - 20, entry_h), 1)
+
+            # Category tag
+            cat_color = listing.get("color", (180, 180, 180))
+            cat_text = small_font.render(
+                f"[{listing['category_label']}]", True, cat_color)
+            screen.blit(cat_text, (px + 16, y_off + 4))
+
+            # Title
+            color = (230, 230, 240) if selected else (190, 190, 200)
+            t = body_font.render(listing["title"], True, color)
+            screen.blit(t, (px + 16, y_off + 18))
+
+            # Body (truncated)
+            body = listing["body"]
+            if len(body) > 65:
+                body = body[:62] + "..."
+            d = small_font.render(body, True, (150, 155, 170))
+            screen.blit(d, (px + 16, y_off + 35))
+
+            # Poster
+            p = small_font.render(f"- {listing['poster']}", True, (120, 120, 140))
+            screen.blit(p, (px + 16, y_off + 48))
+
+            y_off += entry_h + 3
+
+        help_y = py_top + ph - 22
+        help_text = small_font.render(
+            "[W/S] Navigate  [Esc] Close", True, (120, 130, 160))
+        screen.blit(help_text, (px + 10, help_y))
+
     def _process_dialog_result(self, npc, result: str):
         """Process a dialog choice - trigger game mechanics AND generate memories."""
         if not npc:
@@ -1225,6 +2157,7 @@ class Game(DialogResultsMixin, MultiplayerMixin):
             if npc.quest and npc.quest.completed and not npc.quest.turned_in:
                 turn_in_result = self.quest_sys.turn_in_quest(npc.quest, self.player)
                 if turn_in_result:
+                    self.sound.play("quest_complete")
                     self.notifications.add(turn_in_result, 4.0, GREEN)
                     npc.has_quest_marker = False
                     npc.add_memory("quest", "The player completed my task! Grateful.", 5)
@@ -1234,6 +2167,63 @@ class Game(DialogResultsMixin, MultiplayerMixin):
 
         elif result == "quest_reward":
             npc.add_memory("social", "The player asked about rewards. Practical type.", 1)
+
+        # === NPC JOB QUEST GIVERS ===
+        elif result == "guard_bounty_quest":
+            from game.systems.quest_board_init import generate_guard_quest
+            settlement = getattr(npc, 'home_settlement', '')
+            quest = generate_guard_quest(
+                npc.name, settlement,
+                getattr(self.player, 'level', 1))
+            if self.quest_sys.accept_quest(quest):
+                self.notifications.add(f"New quest: {quest.title}", 4.0, YELLOW)
+                self.notifications.add(
+                    f"Reward: {quest.reward_gold}g, {quest.reward_xp} XP",
+                    3.0, (220, 200, 80))
+                npc.add_memory("quest", "Gave the player a bounty contract", 3)
+                npc.player_relationship = min(100, npc.player_relationship + 3)
+            else:
+                self.notifications.add("Quest log full! (max 10)", 3.0, RED)
+
+        elif result == "merchant_delivery_quest":
+            from game.systems.quest_board_init import generate_merchant_quest
+            settlement = getattr(npc, 'home_settlement', '')
+            # Find nearby settlements for delivery destination
+            nearby = []
+            if hasattr(self.world, 'plan'):
+                for sp in self.world.plan.settlements:
+                    if sp.name != settlement:
+                        nearby.append(sp.name)
+            if not nearby:
+                nearby = ["a nearby town"]
+            quest = generate_merchant_quest(
+                npc.name, settlement, nearby,
+                getattr(self.player, 'level', 1))
+            if self.quest_sys.accept_quest(quest):
+                self.notifications.add(f"New quest: {quest.title}", 4.0, YELLOW)
+                self.notifications.add(
+                    f"Reward: {quest.reward_gold}g, {quest.reward_xp} XP",
+                    3.0, (220, 200, 80))
+                npc.add_memory("quest", "Hired the player for a delivery", 3)
+                npc.player_relationship = min(100, npc.player_relationship + 3)
+            else:
+                self.notifications.add("Quest log full! (max 10)", 3.0, RED)
+
+        elif result == "scholar_investigation_quest":
+            from game.systems.quest_board_init import generate_scholar_quest
+            settlement = getattr(npc, 'home_settlement', '')
+            quest = generate_scholar_quest(
+                npc.name, settlement,
+                getattr(self.player, 'level', 1))
+            if self.quest_sys.accept_quest(quest):
+                self.notifications.add(f"New quest: {quest.title}", 4.0, YELLOW)
+                self.notifications.add(
+                    f"Reward: {quest.reward_gold}g, {quest.reward_xp} XP",
+                    3.0, (220, 200, 80))
+                npc.add_memory("quest", "Sent the player to investigate the ruins", 3)
+                npc.player_relationship = min(100, npc.player_relationship + 3)
+            else:
+                self.notifications.add("Quest log full! (max 10)", 3.0, RED)
 
         # === RECRUITMENT ===
         elif result == "recruit_offer":
@@ -1741,6 +2731,10 @@ class Game(DialogResultsMixin, MultiplayerMixin):
     # ================================================================
 
     def _update(self, dt: float):
+        # Tutorial system
+        if self.tutorial and self.tutorial.active:
+            self.tutorial.update(dt, self)
+
         # Auto-play mode: AI controls the player
         if self.auto_play:
             actions.auto_play_update(self, dt)
@@ -1749,7 +2743,14 @@ class Game(DialogResultsMixin, MultiplayerMixin):
             keys = pygame.key.get_pressed()
             self.player.vx = 0
             self.player.vy = 0
-            if not self.ui.any_panel_open:
+            _panels_block = (self.ui.any_panel_open
+                             or self.settlement_panel.visible
+                             or self.relationship_panel.visible
+                             or self.fast_travel_ui.active
+                             or self.crafting_ui.active
+                             or self.skill_tree_ui.active
+                             or self.llm_console.visible)
+            if not _panels_block:
                 if keys[pygame.K_w] or keys[pygame.K_UP]:    self.player.vy = -1
                 if keys[pygame.K_s] or keys[pygame.K_DOWN]:  self.player.vy = 1
                 if keys[pygame.K_a] or keys[pygame.K_LEFT]:  self.player.vx = -1
@@ -1800,6 +2801,8 @@ class Game(DialogResultsMixin, MultiplayerMixin):
                 self.player.vx = 0
                 self.player.vy = 0
             self.player.update(dt, self.world)
+            self.crafting_ui.update(dt, self.player)
+            self.skill_tree_ui.update(dt)
 
             # Underground exploration — reveal tiles around player
             if getattr(self.player, 'current_floor', 0) < 0:
@@ -1807,6 +2810,16 @@ class Game(DialogResultsMixin, MultiplayerMixin):
                 for dy in range(-3, 4):
                     for dx in range(-3, 4):
                         self.player._underground_explored.add((px + dx, py + dy))
+
+        # Audio: ambient sounds (footsteps removed)
+        _px_tile = int(self.player.x)
+        _py_tile = int(self.player.y)
+        _cur_tile = self.world.tiles[_py_tile][_px_tile]
+        _tnorm = getattr(self.time_sys, 'normalized',
+                         self.time_sys.time / DAY_LENGTH)
+        self.sound.update_ambient(
+            dt, _cur_tile, _tnorm,
+            self.player.x, self.player.y, self.world)
 
         # Track which building the player is inside (for roof removal in 2D)
         # Only recalculate when player moves to a new tile position
@@ -1872,23 +2885,34 @@ class Game(DialogResultsMixin, MultiplayerMixin):
                 _pre_hp[id(_t)] = (getattr(_t, 'hp', 0), _t)
             self.combat.update(dt, self.player, self.party.companions,
                               self.world_mgr.creatures, self.world_mgr.npcs, self.world)
-            # Detect damage dealt this frame -> screen shake + HP bar
+            # Detect damage dealt this frame -> visual effects
+            _cfx = getattr(self.active_renderer, 'combat_fx', None)
             for eid, (old_hp, ent) in _pre_hp.items():
                 new_hp = getattr(ent, 'hp', old_hp)
                 dmg = old_hp - new_hp
                 if dmg > 0:
+                    is_kill = not getattr(ent, 'alive', True)
+                    # Audio: combat hit sound
+                    self.sound.play_combat_hit(
+                        "melee", ent.x, ent.y,
+                        self.player.x, self.player.y)
+                    if is_kill:
+                        self.sound.play("death_sound")
+                    # New combat effects system (popups, flashes, HP bars, death)
+                    if _cfx:
+                        _cfx.on_damage_dealt(ent, int(dmg), is_kill=is_kill)
                     # Screen shake on big hits
                     if hasattr(self.renderer, 'trigger_screen_shake'):
                         self.renderer.trigger_screen_shake(int(dmg))
-                    # Mark entity for HP bar display
+                    # Legacy HP bar (still useful as backup on strategy renderer)
                     if hasattr(self.renderer, 'mark_hp_bar_target'):
                         self.renderer.mark_hp_bar_target(ent)
-                    # Damage popup
-                    if hasattr(self.renderer, 'spawn_damage_popup'):
-                        self.renderer.spawn_damage_popup(ent.x, ent.y, int(dmg))
             # Also mark current target for HP bar
-            if self.combat.player_state.target and hasattr(self.renderer, 'mark_hp_bar_target'):
-                self.renderer.mark_hp_bar_target(self.combat.player_state.target)
+            if self.combat.player_state.target:
+                if hasattr(self.renderer, 'mark_hp_bar_target'):
+                    self.renderer.mark_hp_bar_target(self.combat.player_state.target)
+                if _cfx:
+                    _cfx.mark_hp_bar(self.combat.player_state.target)
 
             # Handle kills: drops, particles, quests
             for c in self.world_mgr.creatures:
@@ -1898,9 +2922,17 @@ class Game(DialogResultsMixin, MultiplayerMixin):
                     c._death_handled = True
                     self.renderer.spawn_hit_particles(c.x, c.y)
                     self.renderer.spawn_xp_particles(c.x, c.y)
+                    # Death effect via both legacy and new system
                     if hasattr(self.renderer, 'spawn_death_effect'):
                         self.renderer.spawn_death_effect(c.x, c.y)
+                    if _cfx:
+                        _cfx.spawn_death_effect(c.x, c.y)
                     self.quest_sys.on_kill(c.kind)
+                    # Track kill for title system
+                    if hasattr(self.player, 'title_tracker'):
+                        self.player.title_tracker.record_kill(c.kind)
+                    self.combat_log_panel.add_message(
+                        f"Killed {c.kind}! +{c.xp_value} XP")
                     # Quest trigger: defend quests when creature dies near settlement
                     for s in self.world.structures:
                         if s.kind in ("village", "town", "city", "hamlet", "castle"):
@@ -1911,6 +2943,18 @@ class Game(DialogResultsMixin, MultiplayerMixin):
                     if drops:
                         self.world_mgr.drop_items(c.x, c.y, drops)
 
+        # Drain combat visual events from CombatSystem (NPC/creature fights)
+        from game.systems.combat import drain_combat_visuals
+        _cfx = getattr(self.active_renderer, 'combat_fx', None)
+        for evt in drain_combat_visuals():
+            if _cfx is None:
+                continue
+            if evt["type"] == "damage":
+                _cfx.on_damage_dealt(evt["target"], evt["damage"],
+                                     is_kill=evt.get("is_kill", False))
+            elif evt["type"] == "death":
+                _cfx.spawn_death_effect(evt["x"], evt["y"])
+
         # Pick up pending spell visuals from player and combat system
         if hasattr(self.renderer, 'spawn_spell_effect'):
             # From magic system (via cast_spell on player)
@@ -1919,6 +2963,16 @@ class Game(DialogResultsMixin, MultiplayerMixin):
                 self.renderer.spawn_spell_effect(
                     vis["spell_name"], vis["x"], vis["y"],
                     vis.get("target_x"), vis.get("target_y"))
+                # Audio: spell-specific sounds
+                sname = vis["spell_name"].lower()
+                if "fire" in sname or "flame" in sname:
+                    self.sound.play("fireball_impact")
+                elif "lightning" in sname or "shock" in sname:
+                    self.sound.play("lightning")
+                elif "ice" in sname or "frost" in sname:
+                    self.sound.play("ice_shatter")
+                else:
+                    self.sound.play("spell_cast")
             if pending:
                 self.player._pending_spell_visuals = []
             # From tactical combat system
@@ -1931,6 +2985,7 @@ class Game(DialogResultsMixin, MultiplayerMixin):
                 self.combat._pending_spell_visuals = []
 
         if not self.player.alive:
+            self.sound.play("death_sound")
             if self.player_mode == "god":
                 self.player.alive = True
                 self.player.hp = 99999
@@ -1958,12 +3013,28 @@ class Game(DialogResultsMixin, MultiplayerMixin):
                 self.dead = False  # don't show death screen, just become ghost
 
         self.camera.update(self.player.x, self.player.y)
+        # Divine commands update (visual effects, step-one tick handling)
+        if hasattr(self, 'divine_commands'):
+            self.divine_commands.update(dt)
+            self.divine_commands._last_game = self
         self.time_sys.update(dt)
         # Store normalized time on world for renderer shadow calculations
         self.world._time_normalized = getattr(self.time_sys, 'normalized',
                                                self.time_sys.time / DAY_LENGTH)
         self.world_mgr.update(dt, self.player, self.time_sys.time)
         self.simulation.update(dt, self.player)
+
+        # LLM console: poll for pending responses
+        self.llm_console.update(self)
+
+        # Road builder: auto-place while moving
+        if self.road_builder.active:
+            self.road_builder.handle_movement(self)
+
+        # Water ripples: update animations and check player
+        self.water_ripples.update(dt)
+        self.water_ripples.check_entity_in_water(
+            self.player, self.world.tiles, self.world.width, self.world.height, dt)
 
         # Filtered events - only show what the player can witness nearby
         all_events = self.simulation.get_event_log()
@@ -1984,6 +3055,51 @@ class Game(DialogResultsMixin, MultiplayerMixin):
         # Information spreading (NPCs near player share gossip)
         self.simulation.info.update(dt, self.world_mgr.npcs, self.player,
                                     self.simulation.npc_grid, self.time_sys.day)
+
+        # Letter system: NPC-to-player mail delivery
+        _social = getattr(self.simulation, 'social', None)
+        newly_delivered = self.letter_system.update(
+            dt, self.time_sys.day, self.world_mgr.npcs, self.player,
+            social_system=_social)
+        for letter in newly_delivered:
+            self.notifications.add(
+                f"New letter from {letter.sender_name}: {letter.subject}",
+                5.0, (220, 200, 100))
+            self.combat_log_panel.add_message(
+                f"Letter arrived from {letter.sender_name}", (220, 200, 100))
+
+        # Audio: detect level-up and damage-taken
+        if self.player.level > self._last_player_level:
+            self.sound.play("level_up")
+            self._last_player_level = self.player.level
+        if self.player.hp < self._last_player_hp:
+            self.sound.play("damage_taken")
+        self._last_player_hp = self.player.hp
+
+        # Phase 6: Periodic title check, combat log ingestion, settlement tracking
+        self._title_check_timer += dt
+        if self._title_check_timer >= 2.0:
+            self._title_check_timer = 0.0
+            from game.systems.titles import update_titles
+            update_titles(self.player, self.notifications)
+            # Track settlement visits
+            if hasattr(self.player, 'title_tracker') and hasattr(self.world, 'plan'):
+                px, py = int(self.player.x), int(self.player.y)
+                for sp in self.world.plan.settlements:
+                    if abs(sp.x - px) <= sp.radius and abs(sp.y - py) <= sp.radius:
+                        self.player.title_tracker.record_settlement_visit(sp.name)
+                        break
+        # Ingest tactical combat log into our combat log panel
+        if self.combat.active:
+            self.combat_log_panel.ingest_combat_log(self.combat.combat_log)
+        # Forward visible simulation events to combat log panel
+        if all_events:
+            for msg, color in visible:
+                self.combat_log_panel.add_message(msg, color)
+
+        # Drain overheard conversation snippets into combat log
+        for entry in self.simulation._snippet_manager.drain_log_entries():
+            self.combat_log_panel.add_message(entry, (200, 180, 140))
 
         # Exploration
         if self.player.vx != 0 or self.player.vy != 0:
@@ -2038,6 +3154,33 @@ class Game(DialogResultsMixin, MultiplayerMixin):
                         self.nearby_npc = npc
                         break
 
+        # Nearby intelligent creature — check for dialog-capable creatures
+        self.nearby_creature = None
+        if not self.ui.any_panel_open:
+            from game.core.creature_dialogs import is_intelligent
+            _nearby_crs = self.simulation.creature_grid.get_nearby(
+                self.player.x, self.player.y, NPC_INTERACTION_RANGE + 1)
+            best_cr_dist = NPC_INTERACTION_RANGE + 1
+            for cr in _nearby_crs:
+                if not cr.alive or not is_intelligent(cr.kind):
+                    continue
+                d = self.player.dist_to(cr)
+                if d < best_cr_dist:
+                    best_cr_dist = d
+                    self.nearby_creature = cr
+
+            # Creature-initiated conversation
+            for cr in _nearby_crs:
+                if getattr(cr, 'wants_to_talk', False) and cr.alive:
+                    if self.player.dist_to(cr) < NPC_CONVERSATION_RANGE + 1:
+                        reason = getattr(cr, 'talk_reason', 'wants to speak')
+                        kind_name = cr.kind.replace('_', ' ').title()
+                        self.notifications.add(
+                            f'{kind_name}: "{reason}"', 6.0, YELLOW)
+                        cr.wants_to_talk = False
+                        self.nearby_creature = cr
+                        break
+
         # Trespass detection
         trespass_msg = self.building_sys.check_trespass(
             self.player, self.world_mgr.npcs, self.time_sys.time)
@@ -2053,6 +3196,21 @@ class Game(DialogResultsMixin, MultiplayerMixin):
             self.location_banner_timer = 3.0
             # Quest trigger: on_reach_location for investigate/escort/diplomacy
             self.quest_sys.on_reach_location(loc_name)
+            # Main questline location trigger
+            _game_day = int(getattr(self.time_sys, 'day', 0))
+            _mq_msgs = self.main_quest.on_reach_location(loc_name, _game_day)
+            for _mq_m in _mq_msgs:
+                self.notifications.add(_mq_m, 6.0, (100, 200, 200))
+            # Auto-turn-in starting quest (no NPC giver to talk to)
+            for _q in list(self.quest_sys.active_quests):
+                if (_q.title == "Find Civilization" and _q.completed
+                        and not _q.turned_in):
+                    _reward = self.quest_sys.turn_in_quest(_q, self.player)
+                    if _reward:
+                        self.notifications.add(_reward, 5.0, GREEN)
+                    hint = getattr(_q, 'hint', '')
+                    if hint:
+                        self.notifications.add(hint, 6.0, (180, 200, 140))
         elif not loc_name:
             self.current_location = ""
         if self.location_banner_timer > 0:
@@ -2082,6 +3240,11 @@ class Game(DialogResultsMixin, MultiplayerMixin):
 
         if self.attack_flash_timer > 0:
             self.attack_flash_timer -= dt
+
+        # Elemental effects: fire spread, ice thaw, acid dissolution
+        self.elemental.tick(dt, self.world)
+        self.elemental.damage_entities_in_effects(
+            self.world_mgr.creatures, self.world_mgr.npcs, dt)
 
     # ================================================================
     # DRAW
@@ -2131,15 +3294,39 @@ class Game(DialogResultsMixin, MultiplayerMixin):
                 r.draw_farm_overlays(self.world, self.camera)
             r.draw_ground_items(self.world_mgr.ground_items, self.camera)
 
+            # Construction scaffolding overlay
+            _csys = getattr(self.simulation, 'construction', None)
+            if _csys and hasattr(r, 'draw_construction_scaffolding'):
+                r.draw_construction_scaffolding(_csys, self.camera)
+
+            # Elemental terrain effects (fire, ice, acid, scorch overlays)
+            self.elemental_renderer.draw(
+                self.screen, self.camera, self.elemental, dt)
+
             r._last_dt = dt
             r.draw_creatures(self.world_mgr.creatures, self.camera, self.visible_tiles)
             r.draw_npcs(self.world_mgr.npcs, self.camera, self.player, self.visible_tiles)
+            # Draw conversation partner lines between talking NPCs
+            if SHOW_NPC_CONVERSATIONS and hasattr(self, 'simulation') and hasattr(r, 'draw_conversation_lines'):
+                r.draw_conversation_lines(
+                    self.simulation.conversations, self.camera, self.visible_tiles)
             r.draw_player(self.player, self.camera)
 
-            # Enemy health bars (combat polish)
+            # Water ripple effects (shallow water splashes)
+            self.water_ripples.draw(self.screen, self.camera)
+
+            # Enemy health bars (combat polish — legacy + new system)
             if hasattr(r, 'draw_enemy_hp_bars'):
-                _all_entities = list(self.world_mgr.creatures) + list(self.world_mgr.npcs)
+                _all_entities = itertools.chain(self.world_mgr.creatures, self.world_mgr.npcs)
                 r.draw_enemy_hp_bars(_all_entities, self.camera, dt)
+
+            # Combat visual effects: damage popups, hit flashes, death effects, HP bars
+            if hasattr(r, 'combat_fx'):
+                r.combat_fx.update_and_draw(self.screen, self.camera, dt)
+                r.combat_fx.draw_hp_bars(self.screen, self.camera, dt)
+
+            # Overheard NPC conversation snippets (floating text)
+            self._draw_conversation_snippets(dt)
 
             # Spell visual effects (combat polish)
             if hasattr(r, 'draw_spell_effects'):
@@ -2148,17 +3335,6 @@ class Game(DialogResultsMixin, MultiplayerMixin):
             # Draw remote multiplayer players
             if self.remote_players:
                 self._draw_remote_players()
-
-            # Footstep dust when player moves
-            if hasattr(r, 'spawn_footstep_dust') and hasattr(r, '_last_player_pos'):
-                px, py = self.player.x, self.player.y
-                lp = r._last_player_pos
-                if lp and (abs(px - lp[0]) > 0.05 or abs(py - lp[1]) > 0.05):
-                    r._footstep_timer += self.clock.get_time() / 1000.0
-                    if r._footstep_timer >= 0.25:
-                        r._footstep_timer = 0.0
-                        r.spawn_footstep_dust(px, py)
-                r._last_player_pos = (px, py)
 
             r.draw_world_events(self.simulation.events, self.camera)
             if hasattr(r, 'draw_battle_visuals') and hasattr(self.simulation, 'battle_visuals'):
@@ -2175,15 +3351,18 @@ class Game(DialogResultsMixin, MultiplayerMixin):
             # Seasonal tile palette update (4 times per year)
             if hasattr(r, 'set_season') and hasattr(self.simulation, 'ecology'):
                 r.set_season(self.simulation.ecology.season)
+            # Bind vegetation/crop systems for per-tile color overrides
+            if hasattr(r, 'set_vegetation_systems') and r._vegetation_sys is None:
+                if hasattr(self.simulation, 'vegetation_sys'):
+                    r.set_vegetation_systems(
+                        self.simulation.vegetation_sys,
+                        getattr(self.simulation, 'crop_system', None))
             # Weather visual effects (rain, snow, fog, storm)
             if hasattr(r, 'draw_weather') and hasattr(self.simulation, 'ecology'):
                 _weather = self.simulation.ecology.weather
                 r.draw_weather(_weather, self.camera, self.clock.get_time() / 1000.0)
             if not is_3d:  # night overlay uses pygame blit in 2D, GL in 3D
-                if hasattr(r, 'draw_lighting'):
-                    r.draw_lighting(self.time_sys.normalized, self.camera, self.world)
-                else:
-                    r.draw_night_overlay(self.time_sys.darkness)
+                r.draw_lighting(self.time_sys.normalized, self.camera, self.world)
 
             # Undo screen shake offset so camera is stable for HUD/UI
             if _shake_dx or _shake_dy:
@@ -2215,6 +3394,31 @@ class Game(DialogResultsMixin, MultiplayerMixin):
                 self.screen.blit(flash, (0, 0))
 
             self.ui.draw_hud(self.player, self.time_sys)
+            self.spell_bar.draw(self.screen, self.player, self.targeting)
+
+            # Tutorial hint overlay
+            if self.tutorial and self.tutorial.active:
+                self.tutorial.draw_hint(
+                    self.screen, self.renderer.font_md, self.renderer.font_sm)
+
+            # Spell/ranged targeting overlay
+            if self.targeting.is_active():
+                self.targeting.draw(self.screen, self.camera, self.player)
+
+            # Mouse hover tooltip (entity name/HP when hovering)
+            hover = getattr(self.targeting, 'hover_entity', None)
+            if hover and getattr(hover, 'alive', False):
+                mp = getattr(self, '_mouse_pos', (0, 0))
+                name = getattr(hover, 'name', getattr(hover, 'kind', '?'))
+                hp = getattr(hover, 'hp', 0)
+                max_hp = getattr(hover, 'max_hp', 1)
+                tip = f"{name} ({int(hp)}/{int(max_hp)} HP)"
+                tip_surf = self.renderer.font_sm.render(tip, True, (220, 220, 230))
+                tw, th = tip_surf.get_size()
+                tx, ty = mp[0] + 12, mp[1] - 8
+                pygame.draw.rect(self.screen, (20, 20, 35),
+                                 (tx - 2, ty - 1, tw + 4, th + 2))
+                self.screen.blit(tip_surf, (tx, ty))
 
             # Object highlighting overlay
             if hasattr(self, 'highlight'):
@@ -2257,6 +3461,17 @@ class Game(DialogResultsMixin, MultiplayerMixin):
                 self.ui.draw_pickup_prompt(self.world_mgr.ground_items,
                                            self.player.x, self.player.y)
 
+            # Contextual help tooltips (only when no NPC prompt shown)
+            if not self.nearby_npc and hasattr(self, 'tooltip_sys'):
+                _bcache = getattr(self.renderer, '_building_function_cache', {})
+                self.tooltip_sys.update_and_draw(
+                    self.screen, self.player, self.world,
+                    self.world_mgr.npcs, self.world_mgr.creatures,
+                    _bcache,
+                    self.clock.get_time() / 1000.0,
+                    self.ui.any_panel_open,
+                )
+
             if self.location_banner_timer > 0:
                 self.ui.draw_location_banner(self.location_banner, min(1.0, self.location_banner_timer))
             if self.examine_text:
@@ -2265,6 +3480,10 @@ class Game(DialogResultsMixin, MultiplayerMixin):
             self.ui.draw_notifications(self.notifications.notifications)
             self.ui.draw_dialog()
             self.ui.draw_text_input()
+            if getattr(self, 'quest_board_active', False):
+                self._draw_quest_board()
+            if getattr(self, 'msg_board_active', False):
+                self._draw_message_board()
             if self.ui.shop_active:
                 self.ui.draw_shop(self.player)
             if self.ui.gift_active:
@@ -2272,12 +3491,32 @@ class Game(DialogResultsMixin, MultiplayerMixin):
             self.ui.draw_inventory(self.player)
             self.ui.draw_quest_log(self.quest_sys.active_quests)
             self.ui.draw_character_sheet(self.player)
+            self.crafting_ui.draw(self.screen, self.player)
+            self.skill_tree_ui.draw(self.screen, self.player)
             self.ui.draw_chronicle(self.chronicles)
+
+            # Relationship overview panel (Shift+R)
+            _social = getattr(self.simulation, 'social', None)
+            self.relationship_panel.draw(
+                self.screen, self.player, self.world_mgr.npcs,
+                social_system=_social, time_system=self.time_sys)
+
+            # Unread letter notification (shown on HUD when letters available)
+            if hasattr(self, 'letter_system') and self.letter_system.unread_count > 0:
+                _lcount = self.letter_system.unread_count
+                _ltext = self.renderer.font_sm.render(
+                    f"[Mail: {_lcount} unread]", True, (220, 200, 100))
+                _lbg = pygame.Surface((_ltext.get_width() + 8, 18), pygame.SRCALPHA)
+                _lbg.fill((30, 25, 15, 200))
+                self.screen.blit(_lbg, (SCREEN_WIDTH - _ltext.get_width() - 14, 100))
+                self.screen.blit(_ltext, (SCREEN_WIDTH - _ltext.get_width() - 10, 101))
             self.ui.draw_planet_view(1.0 / FPS, self.time_sys)
 
             # Quest tracker HUD (only when no panels are open)
             if not self.ui.any_panel_open:
-                self.ui.draw_quest_tracker(self.quest_sys.active_quests)
+                self.quest_tracker.draw(
+                    self.screen, self.quest_sys.active_quests,
+                    self.player, self.world)
 
             if self.ui.show_world_map:
                 self.ui.world_map_view.update_scroll(1.0 / FPS)
@@ -2291,6 +3530,15 @@ class Game(DialogResultsMixin, MultiplayerMixin):
             # self.ui.draw_pause_menu() is no longer used
             if self.dead:
                 self.ui.draw_death_screen()
+
+            # Road building mode overlay
+            self.road_builder.draw(self.screen, self.camera, self.player)
+
+            # Controls overlay (on top of everything)
+            self.controls_overlay.draw(self.screen)
+
+            # LLM console (on top of all game UI)
+            self.llm_console.draw(self.screen)
 
         # Mode indicator
         if self.player_mode == "ghost":
@@ -2310,10 +3558,16 @@ class Game(DialogResultsMixin, MultiplayerMixin):
             else:
                 mode_text = self.renderer.font_md.render("GOD MODE", True, (255, 220, 100))
                 self.screen.blit(mode_text, (SCREEN_WIDTH // 2 - mode_text.get_width() // 2, 48))
+            # Divine commands: effects, menus, HUD, dashboard
+            if hasattr(self, 'divine_commands'):
+                self.divine_commands.draw_effects(self.screen, self.camera)
+                self.divine_commands.draw_hud(self.screen)
+                self.divine_commands.draw_menu(self.screen)
+                self.god_dashboard.draw(self.screen)
             # Claude hint (always show in god mode)
             if not self.claude_chat.visible:
                 claude_hint = self.renderer.font_sm.render(
-                    "[F9] Claude AI  [K] API Key  [~] Console  [F6] Tweaker  [F7] Reload", True, (160, 160, 200))
+                    "[F10] Claude AI  [Shift+K] API Key  [~] Console  [F6] Tweaker  [F7] Reload", True, (160, 160, 200))
                 self.screen.blit(claude_hint,
                                  (SCREEN_WIDTH - claude_hint.get_width() - 10, 50))
 

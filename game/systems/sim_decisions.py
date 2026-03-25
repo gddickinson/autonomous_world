@@ -144,12 +144,29 @@ class SimDecisionsMixin:
                 npc._decision_req_id = req_id
                 npc.pending_llm_decision = True
             else:
+                # Independent approach check — NPCs notice player regardless of schedule
+                if (dist < 8 and not npc.wants_to_talk
+                        and npc.current_action != "approaching_player"
+                        and random.random() < 0.08):
+                    rel = getattr(npc, 'player_relationship', 0)
+                    if rel > 20:
+                        reason = "want to catch up with an old friend"
+                    elif getattr(npc, 'has_quest_marker', False):
+                        reason = "have something important to discuss"
+                    elif random.random() < 0.5:
+                        reason = "curious about the traveler"
+                    else:
+                        reason = "want to share some local news"
+                    decision = f"APPROACH_PLAYER | player | {reason}"
+                    self._apply_decision(npc, decision)
+                    continue
+
                 # Check schedule first - gives NPCs daily routines
                 from game.systems.schedules import get_scheduled_action
                 scheduled = get_scheduled_action(
                     npc, self.time_sys.normalized, self.world, self.world.structures)
 
-                if scheduled and random.random() < 0.85:  # 85% follow schedule, 15% free will
+                if scheduled and random.random() < 0.90:  # 90% follow schedule, 10% free will
                     decision = f"{scheduled['action']} | {scheduled.get('target_x', 'nearby')} | {scheduled['reason']}"
                     if scheduled.get('target_x') is not None:
                         npc.target_x = scheduled['target_x']
@@ -164,7 +181,46 @@ class SimDecisionsMixin:
                         party_id=getattr(npc, 'party_id', None),
                         alignment=getattr(npc, 'alignment', 'true neutral'),
                     )
+                    # Prevent pure idle — if decision is IDLE, try to assign
+                    # job-related work instead
+                    if decision.upper().startswith("IDLE"):
+                        from game.systems.schedules import CLASS_WORK_ACTIONS
+                        cls = getattr(npc, 'char_class', '') or npc.profession
+                        fallback = CLASS_WORK_ACTIONS.get(cls, CLASS_WORK_ACTIONS.get(npc.profession))
+                        if fallback:
+                            chosen = random.choice(fallback)
+                            parts = [p.strip() for p in chosen.split("|")]
+                            decision = f"{parts[0]} | {parts[1] if len(parts) > 1 else 'nearby'} | {parts[2] if len(parts) > 2 else 'keeping busy'}"
                 self._apply_decision(npc, decision)
+
+    def _check_creature_approaches(self, creatures, dt: float, player: Player):
+        """Give intelligent creatures a chance to approach the player."""
+        from game.core.creature_dialogs import is_intelligent
+        for creature in creatures:
+            if not creature.alive or not is_intelligent(creature.kind):
+                continue
+            if getattr(creature, 'wants_to_talk', False):
+                continue
+            if getattr(creature, 'state', '') in ('chasing', 'attacking', 'fleeing'):
+                continue
+            dist = creature.dist_to(player)
+            if dist < 8 and random.random() < 0.03:
+                creature.wants_to_talk = True
+                reasons = {
+                    "orc": "demands you leave their territory",
+                    "goblin": "wants to trade with you",
+                    "kobold": "squeaks nervously at you",
+                    "gnoll": "sniffs the air hungrily",
+                    "bandit": "blocks the road ahead",
+                    "bugbear": "growls a warning",
+                    "hobgoblin": "barks a challenge",
+                }
+                base = creature.kind.split("_")[0]
+                creature.talk_reason = reasons.get(
+                    base, "wants to speak with you")
+                # Stop chasing so conversation can happen
+                creature.state = "idle"
+                creature.target = None
 
     def _poll_decisions(self, npcs: List[NPC]):
         for npc in npcs:

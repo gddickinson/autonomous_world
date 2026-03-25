@@ -18,57 +18,62 @@ from game.settings import (
 BIOME_CREATURES = {
     # Grassland
     GRASS: {
-        "common": ["rabbit", "deer", "fox", "hawk", "squirrel", "crow",
-                    "sheep", "cow", "pheasant", "frog"],
-        "uncommon": ["horse", "elk", "wild_boar", "snake", "dog", "goat",
+        "common": ["rabbit", "rabbit", "deer", "deer", "fox", "fox",
+                    "hawk", "squirrel", "crow", "pheasant", "frog"],
+        "uncommon": ["horse", "elk", "wild_boar", "snake", "goat",
                      "boar", "wolf"],
         "rare": ["centaur", "unicorn", "manticore"],
         "weights": [60, 30, 10],
     },
     # Forest
     FOREST: {
-        "common": ["deer", "rabbit", "squirrel", "owl", "fox", "wolf",
-                    "pheasant", "crow"],
+        "common": ["deer", "deer", "rabbit", "rabbit", "squirrel", "owl",
+                    "fox", "fox", "wolf", "wolf", "pheasant", "crow", "boar"],
         "uncommon": ["bear", "wild_boar", "spider", "bat", "snake",
-                     "boar", "bugbear"],
+                     "bugbear"],
         "rare": ["dire_wolf", "giant_spider", "unicorn", "werewolf"],
-        "weights": [50, 35, 15],
+        "weights": [55, 30, 15],
     },
     # Dense Forest
     DENSE_FOREST: {
         "common": ["wolf", "spider", "bat", "owl", "snake", "rat"],
         "uncommon": ["bear", "dire_wolf", "giant_spider", "wild_boar",
                      "bugbear", "skeleton"],
-        "rare": ["troll", "basilisk", "wyvern", "owlbear", "vampire"],
+        "rare": ["troll", "basilisk", "wyvern", "owlbear"],
         "weights": [40, 40, 20],
     },
     # Mountain
     MOUNTAIN: {
-        "common": ["goat", "eagle", "hawk", "bat", "crow"],
-        "uncommon": ["mountain_lion", "bear", "giant_scorpion", "kobold"],
+        "common": ["goat", "goat", "eagle", "eagle", "hawk", "hawk",
+                    "bat", "crow"],
+        "uncommon": ["mountain_lion", "bear", "bear", "giant_scorpion",
+                     "kobold"],
         "rare": ["griffin", "wyvern", "young_dragon", "gargoyle"],
-        "weights": [45, 40, 15],
+        "weights": [50, 35, 15],
     },
     # Swamp
     SWAMP: {
-        "common": ["frog", "snake", "rat", "turtle", "bat", "crow"],
-        "uncommon": ["crocodile", "giant_spider", "viper", "zombie", "skeleton"],
-        "rare": ["basilisk", "troll", "harpy", "ghoul", "wraith"],
-        "weights": [50, 35, 15],
+        "common": ["frog", "snake", "snake", "rat", "turtle", "bat",
+                    "crow", "viper"],
+        "uncommon": ["crocodile", "giant_spider", "zombie", "skeleton"],
+        "rare": ["basilisk", "troll", "harpy", "ghoul"],
+        "weights": [55, 30, 15],
     },
     # Shallow Water / Shore
     SHALLOW_WATER: {
-        "common": ["fish", "frog", "turtle", "fish_school"],
-        "uncommon": ["crocodile", "giant_crab"],
+        "common": ["frog", "turtle"],
+        "uncommon": ["fish", "giant_crab"],
         "rare": [],
-        "weights": [70, 30, 0],
+        "weights": [65, 35, 0],
+        "spawn_chance": 0.4,   # reduced from 1.0 — fewer aquatic spawns
     },
-    # Water (deep)
+    # Water (deep) — most water tiles produce nothing; fish are rare
     WATER: {
-        "common": ["fish", "fish_school"],
-        "uncommon": [],
+        "common": [],
+        "uncommon": ["fish"],
         "rare": [],
-        "weights": [100, 0, 0],
+        "weights": [0, 100, 0],
+        "spawn_chance": 0.03,  # heavily reduced — fish were 53% of all creatures
     },
     # Sand / Desert
     SAND: {
@@ -103,8 +108,7 @@ PACK_CREATURES = {
     "deer":     (3, 6),
     "rabbit":   (2, 4),
     "crow":     (3, 6),
-    "fish":     (3, 5),
-    "fish_school": (2, 3),
+    "fish":     (1, 2),
     "goblin":   (2, 4),
     "orc":      (2, 3),
     "skeleton": (2, 4),
@@ -143,17 +147,48 @@ UNDEAD_POWER = {
 # WATER-ONLY CREATURES — restricted to water/shallow_water tiles
 # ================================================================
 WATER_ONLY_CREATURES = {
-    "fish", "fish_school",
+    "fish",
 }
 
 # ================================================================
 # SETTLEMENT CREATURES — spawned near settlements
 # ================================================================
+# Base pool used by all settlement types
 SETTLEMENT_CREATURES = {
     "common": ["chicken", "cow", "pig", "sheep", "dog", "cat", "goat"],
     "uncommon": ["horse", "donkey"],
     "guard": ["dog"],  # guard animals near settlement perimeter
 }
+
+# Per-settlement-type domestic animal tables with (kind, min, max) counts
+SETTLEMENT_DOMESTIC = {
+    "hamlet": {
+        "always": [("dog", 1, 2), ("cat", 1, 1)],
+        "farm":   [("chicken", 2, 4), ("pig", 1, 2), ("cow", 1, 1), ("sheep", 1, 3)],
+    },
+    "village": {
+        "always": [("dog", 1, 2), ("cat", 1, 2)],
+        "farm":   [("chicken", 3, 5), ("pig", 2, 3), ("cow", 1, 2),
+                   ("sheep", 2, 4), ("goat", 1, 2)],
+    },
+    "town": {
+        "always": [("dog", 2, 3), ("cat", 1, 3)],
+        "farm":   [("chicken", 3, 5), ("pig", 2, 3), ("cow", 1, 2), ("sheep", 2, 4)],
+        "stable": [("horse", 2, 4), ("donkey", 1, 2)],
+    },
+    "city": {
+        "always": [("dog", 2, 4), ("cat", 2, 4)],
+        "farm":   [("chicken", 2, 3), ("pig", 1, 2), ("cow", 1, 1)],
+        "stable": [("horse", 3, 5), ("donkey", 1, 2)],
+    },
+    "castle": {
+        "always": [("dog", 2, 3), ("cat", 1, 2)],
+        "stable": [("horse", 3, 5)],
+    },
+}
+
+# High-CR undead restricted to ruins/graveyards only
+HIGH_CR_UNDEAD = {"lich", "vampire", "wraith", "shadow"}
 
 # ================================================================
 # PREDATOR-PREY RELATIONSHIPS (for ecosystem simulation)

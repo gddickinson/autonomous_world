@@ -301,6 +301,37 @@ class ChunkGrid:
                 s_rng = _random.Random(self.world_plan.seed ^ hash(sp.name))
                 _generate_settlement_buildings(sp, self.world_plan, s_rng)
 
+    def preload_adjacent(self, cx: int, cy: int):
+        """Preload the 8 chunks surrounding (cx, cy).
+
+        Call this when the player enters a new chunk region to prevent
+        terrain pop-in at chunk boundaries.
+        """
+        for dy in range(-1, 2):
+            for dx in range(-1, 2):
+                if dx == 0 and dy == 0:
+                    continue  # already loaded
+                ncx, ncy = cx + dx, cy + dy
+                if 0 <= ncx < self.chunks_x and 0 <= ncy < self.chunks_y:
+                    self._ensure_chunk(ncx, ncy)
+
+    def preload_boundary_aware(self, x: float, y: float, threshold: float = 0.2):
+        """Preload adjacent chunks when the player is near a chunk boundary.
+
+        ``threshold`` is the fraction of CHUNK_SIZE from the edge at which
+        preloading is triggered (0.2 = within 20% of the edge).
+        """
+        cx = int(x) // CHUNK_SIZE
+        cy = int(y) // CHUNK_SIZE
+        lx = (int(x) % CHUNK_SIZE) / CHUNK_SIZE  # 0..1 position within chunk
+        ly = (int(y) % CHUNK_SIZE) / CHUNK_SIZE
+
+        # Always ensure current chunk's 8 neighbours if near any edge
+        near_edge = (lx < threshold or lx > 1.0 - threshold or
+                     ly < threshold or ly > 1.0 - threshold)
+        if near_edge:
+            self.preload_adjacent(cx, cy)
+
     def preload_around(self, x: float, y: float, radius_chunks: int = 2):
         """Preload chunks in a radius around a world position."""
         cx = int(x) // CHUNK_SIZE

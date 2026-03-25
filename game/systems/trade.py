@@ -69,7 +69,7 @@ class TradeSystem:
     def initialize(self, structures: list):
         """Create initial trade routes between settlements."""
         settlements = [s for s in structures
-                      if s.kind in ("village", "town", "city")]
+                      if s.kind in ("hamlet", "village", "town", "city", "castle")]
 
         # Connect each settlement to 1-3 nearest others
         for s in settlements:
@@ -87,8 +87,8 @@ class TradeSystem:
         """Update caravans and spawn new ones."""
         self.trade_timer += dt
 
-        # Spawn new caravans periodically
-        if self.trade_timer > 120.0 and len(self.caravans) < 10:
+        # Spawn new caravans periodically (every ~30s of accumulated dt)
+        if self.trade_timer > 30.0 and len(self.caravans) < 10:
             self.trade_timer = 0.0
             if self.trade_routes:
                 route = random.choice(self.trade_routes)
@@ -130,16 +130,22 @@ class TradeSystem:
         if not origin:
             return
 
-        # Find a merchant NPC at origin
+        # Find a merchant NPC at origin — prefer Rogues/Bards, but accept anyone
         merchant = None
+        fallback = None
         for npc in npcs:
-            if (npc.alive and npc.dist_to_pos(origin.x, origin.y) < 20 and
-                getattr(npc, 'char_class', '') in ('Rogue', 'Bard') and
-                npc.current_action in ('', 'idle')):
-                merchant = npc
-                break
+            if not npc.alive:
+                continue
+            if npc.dist_to_pos(origin.x, origin.y) < 30:
+                if getattr(npc, 'char_class', '') in ('Rogue', 'Bard'):
+                    merchant = npc
+                    break
+                elif fallback is None and npc.current_action in ('', 'idle'):
+                    fallback = npc
+        if merchant is None:
+            merchant = fallback
 
-        merchant_name = merchant.name if merchant else "Unknown Merchant"
+        merchant_name = merchant.name if merchant else "Traveling Merchant"
 
         caravan = TradeCaravan(
             origin_name, dest_name, merchant_name,
@@ -153,6 +159,9 @@ class TradeSystem:
                 if market.supply.get(item, 0) > 3:
                     caravan.goods[item] = random.randint(2, 5)
                     caravan.gold -= 2
+        # Always carry at least some goods so trade is meaningful
+        if not caravan.goods:
+            caravan.goods["Trade Goods"] = random.randint(3, 8)
 
         self.caravans.append(caravan)
         self.trade_log.append(f"Caravan departs {origin_name} for {dest_name}")
@@ -206,6 +215,60 @@ class TradeSystem:
                 if route not in self.trade_routes and reverse not in self.trade_routes:
                     self.trade_routes.append(route)
             existing_names.add(s.name)
+
+    def passive_trade(self, structures: list, governance):
+        """Daily passive trade along routes — transfers gold between treasuries.
+
+        Called once per game day. Each route has a 20% chance of generating
+        background trade that moves gold and generates event log entries.
+        """
+        struct_map = {s.name: s for s in structures}
+        kingdoms = governance.kingdoms if hasattr(governance, 'kingdoms') else {}
+
+        for origin_name, dest_name in self.trade_routes:
+            if random.random() > 0.20:
+                continue
+
+            origin = struct_map.get(origin_name)
+            dest = struct_map.get(dest_name)
+            if not origin or not dest:
+                continue
+
+            # Determine trade value based on settlement sizes
+            size_bonus = {"hamlet": 0, "village": 1, "town": 2, "city": 3,
+                          "castle": 1}
+            o_bonus = size_bonus.get(origin.kind, 0)
+            d_bonus = size_bonus.get(dest.kind, 0)
+            # Specialization match: different settlement types trade more
+            spec_bonus = 3 if origin.kind != dest.kind else 0
+            trade_value = random.randint(5, 12) + o_bonus + d_bonus + spec_bonus
+
+            # Find kingdoms that own these settlements and transfer gold
+            origin_kingdom = None
+            dest_kingdom = None
+            for kname, kingdom in kingdoms.items():
+                if origin_name in kingdom.settlements:
+                    origin_kingdom = kingdom
+                if dest_name in kingdom.settlements:
+                    dest_kingdom = kingdom
+
+            # Both kingdoms benefit from trade (tax revenue)
+            tax = max(1, trade_value // 5)
+            if origin_kingdom:
+                origin_kingdom.treasury += tax
+            if dest_kingdom:
+                dest_kingdom.treasury += tax
+
+            # Inter-kingdom trade tariffs: 10% tariff when different kingdoms
+            if (origin_kingdom and dest_kingdom
+                    and origin_kingdom is not dest_kingdom):
+                tariff = max(1, int(trade_value * 0.1))
+                origin_kingdom.treasury += tariff
+                dest_kingdom.treasury += tariff
+
+            self.trade_log.append(
+                f"Trade caravan traveled from {origin_name} to {dest_name}, "
+                f"delivering goods worth {trade_value} gold")
 
     def get_trade_log(self) -> List[str]:
         msgs = list(self.trade_log)

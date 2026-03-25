@@ -295,7 +295,7 @@ class BurialSystem:
                     continue  # already mourning
 
                 # Check social relationship
-                rel = social_system.get_relationship(npc.name, grave.npc_name)
+                rel = social_system.get_rel(npc.name, grave.npc_name)
                 affinity = getattr(rel, 'affinity', 0)
 
                 # Only close friends/family mourn (affinity > 30)

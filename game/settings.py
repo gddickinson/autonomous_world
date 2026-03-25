@@ -8,6 +8,16 @@ SCREEN_HEIGHT = 800
 FPS = 60
 TITLE = "Autonomous World"
 
+# Entity overlay toggles (can be changed at runtime)
+SHOW_NPC_NAMES = True
+SHOW_NPC_ACTIONS = True
+SHOW_NPC_STATUS = True       # mood, emotions, traits, need bars
+SHOW_NPC_CARGO = True
+SHOW_SPEECH_BUBBLES = True
+SHOW_QUEST_MARKERS = True
+SHOW_CREATURE_LABELS = True  # kind letter on creatures
+SHOW_NPC_CONVERSATIONS = True  # speech bubbles + lines between conversing NPCs
+
 # Tiles
 TILE_SIZE = 16
 WORLD_WIDTH = 2000        # Legacy — used by old World class
@@ -27,7 +37,7 @@ PLAYER_SPEED = 3.5
 PLAYER_MAX_HP = 100
 PLAYER_MAX_ENERGY = 100
 PLAYER_ATTACK_RANGE = 1.5
-PLAYER_ATTACK_DAMAGE = 15
+PLAYER_ATTACK_DAMAGE = 3  # Base unarmed damage; weapon damage adds on top
 PLAYER_ATTACK_COOLDOWN = 0.4
 
 # NPCs
@@ -119,6 +129,23 @@ STABLE_FLOOR = 66   # stable interior (walkable, mount-related)
 GRAVESTONE = 67     # grave marker (walkable, interactable)
 COURTYARD = 68      # open courtyard (walkable, outdoor interior)
 ARENA_SAND = 69     # arena fighting floor (walkable, combat zone)
+SCORCHED_EARTH = 70 # fire-blackened ground (walkable)
+ICE_SHEET = 71      # frozen surface (slippery, walkable)
+LEVER = 72          # puzzle lever (interactable)
+PRESSURE_PLATE = 73 # puzzle pressure plate (walkable, triggers on step)
+RIDDLE_DOOR = 74    # puzzle door with riddle (blocks until solved)
+HOT_SPRING = 75     # volcanic hot spring (walkable water, special)
+TUNDRA = 76         # frozen grassland (walkable, cold)
+JUNGLE = 77         # dense tropical vegetation (slow, wet)
+DUNE = 78           # sand dune (walkable, desert)
+OASIS_WATER = 79    # oasis pool in desert (water source)
+
+# Terrain generation method
+USE_NEW_TERRAIN = True       # Volcanic island with ridges and rivers; False = legacy FBM
+
+# Settlement generation method
+USE_LTP_SETTLEMENTS = True   # True = new emergent placement, False = legacy random
+USE_VORONOI_LAYOUT = True    # True = Voronoi wards (pre-generated at load), False = legacy zones
 
 # Multiplayer
 DEFAULT_PORT = 7777
@@ -195,6 +222,16 @@ TERRAIN_COLORS = {
     GRAVESTONE:   (140, 135, 130),
     COURTYARD:    (180, 170, 140),
     ARENA_SAND:   (200, 180, 120),
+    SCORCHED_EARTH: (40, 35, 30),
+    ICE_SHEET:    (180, 210, 230),
+    LEVER:        (180, 160, 60),
+    PRESSURE_PLATE: (140, 140, 160),
+    RIDDLE_DOOR:  (100, 60, 120),
+    HOT_SPRING:   (60, 180, 200),
+    TUNDRA:       (190, 200, 195),
+    JUNGLE:       (20, 70, 15),
+    DUNE:         (220, 200, 140),
+    OASIS_WATER:  (50, 160, 180),
 }
 
 TERRAIN_WALK_COST = {
@@ -268,6 +305,16 @@ TERRAIN_WALK_COST = {
     GRAVESTONE: 1.0,     # walkable grave marker
     COURTYARD: 0.9,     # open courtyard, slightly slower than floor
     ARENA_SAND: 1.0,    # arena fighting floor
+    SCORCHED_EARTH: 1.0, # burned ground, normal walking
+    ICE_SHEET: 1.5,      # slippery ice, slightly slower
+    LEVER: 999,          # interactable, blocks movement
+    PRESSURE_PLATE: 0.8, # walkable plate, triggers on step
+    RIDDLE_DOOR: 999,    # blocks until puzzle solved
+    HOT_SPRING: 1.5,     # warm water, wadeable
+    TUNDRA: 1.3,         # frozen grassland
+    JUNGLE: 2.5,         # dense tropical undergrowth
+    DUNE: 1.8,           # soft sand dunes, slow
+    OASIS_WATER: 999,    # oasis pool, not walkable
 }
 
 # Colors
@@ -305,6 +352,7 @@ ITEM_CONSUMABLE = "consumable"
 ITEM_RESOURCE = "resource"
 ITEM_QUEST = "quest"
 ITEM_TOOL = "tool"
+ITEM_ARTIFACT = "artifact"
 ITEM_FOOD = "food"
 ITEM_DRINK = "drink"
 

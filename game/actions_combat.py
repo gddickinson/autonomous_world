@@ -52,8 +52,12 @@ def attack(game):
     msg = game.combat.set_player_target(next_target)
     game.notifications.add(msg, 2.0, RED)
     game.attack_flash_timer = 0.1
+    # Audio: sword hit on engaging combat
+    if hasattr(game, 'sound'):
+        game.sound.play("sword_hit")
 
     # God mode: instant kill
+    _cfx = getattr(game.active_renderer, 'combat_fx', None)
     if getattr(game.player, 'god', False) and next_target.alive:
         name = getattr(next_target, 'name', getattr(next_target, 'kind', '?'))
         next_target.take_damage(99999)
@@ -64,6 +68,8 @@ def attack(game):
                                               (255, 220, 100))
         if hasattr(game.renderer, 'spawn_death_effect'):
             game.renderer.spawn_death_effect(next_target.x, next_target.y)
+        if _cfx:
+            _cfx.on_damage_dealt(next_target, 99999, is_kill=True)
         game.player.gain_skill_xp("swordsmanship", 0.2)
         return
 
@@ -78,6 +84,9 @@ def attack(game):
             if hasattr(game.renderer, 'spawn_damage_popup'):
                 game.renderer.spawn_damage_popup(next_target.x, next_target.y,
                                                   int(bonus_dmg), (255, 220, 60))
+            if _cfx:
+                _cfx.on_damage_dealt(next_target, int(bonus_dmg),
+                                     is_kill=not next_target.alive)
 
     game.player.gain_skill_xp("swordsmanship", 0.2)
 
@@ -94,6 +103,12 @@ def attack(game):
                 game.renderer.spawn_hit_particles(creature.x, creature.y)
                 game.renderer.spawn_xp_particles(creature.x, creature.y)
                 game.quest_sys.on_kill(creature.kind)
+                # Multiplayer: broadcast quest kill progress
+                if hasattr(game, '_mp_broadcast_quest_kill'):
+                    for q in game.quest_sys.active_quests:
+                        if q.target == creature.kind and not q.completed:
+                            game._mp_broadcast_quest_kill(q, game.player.name)
+                            break
                 drops = creature.get_drops()
                 if drops:
                     game.world_mgr.drop_items(creature.x, creature.y, drops)

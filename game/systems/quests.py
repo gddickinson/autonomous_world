@@ -819,11 +819,14 @@ class QuestSystem:
             return ""
 
         quest.turned_in = True
-        player.gold += quest.reward_gold
-        player.gain_xp(quest.reward_xp)
+        from game.systems.difficulty import scale_gold, scale_xp
+        gold_reward = scale_gold(quest.reward_gold)
+        xp_reward = scale_xp(quest.reward_xp)
+        player.gold += gold_reward
+        player.gain_xp(xp_reward)
         player.quests_completed += 1
 
-        reward_text = f"Quest \"{quest.title}\" complete! +{quest.reward_gold} gold, +{quest.reward_xp} XP"
+        reward_text = f"Quest \"{quest.title}\" complete! +{gold_reward} gold, +{xp_reward} XP"
 
         # Standard item reward
         if quest.reward_item:

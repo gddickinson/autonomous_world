@@ -134,6 +134,131 @@ CLASS_WORK_ACTIONS = {
         "MAKE_MAP | map room | documenting the region",
         "RESEARCH | library | translating old manuscripts",
     ],
+    "Woodcutter": [
+        "CHOP_TREE | forest | felling trees",
+        "GATHER_FIREWOOD | forest | collecting firewood",
+        "CHOP_TREE | forest | clearing timber",
+    ],
+    "Blacksmith": [
+        "CRAFT | forge | working the forge",
+        "MINE_ROCK | nearby | collecting ore",
+        "CRAFT | forge | repairing tools",
+    ],
+    "Carpenter":  [
+        "BUILD | floor | building wooden structures",
+        "CHOP_TREE | forest | sourcing lumber",
+        "CRAFT | workshop | shaping wood",
+    ],
+    "Baker":      [
+        "CRAFT | bakery | baking bread",
+        "FETCH_WATER | well | getting water for dough",
+        "FARM | harvest | checking grain supplies",
+    ],
+    "Tanner":     [
+        "TAN_HIDE | tannery | processing hides",
+        "CRAFT | tannery | curing leather",
+        "TRADE | nearby | buying pelts",
+    ],
+    "Weaver":     [
+        "DYE_CLOTH | dye house | dyeing cloth",
+        "CRAFT | loom | weaving fabric",
+        "TRADE | nearby | selling cloth",
+    ],
+    "Potter":     [
+        "CRAFT_POTTERY | pottery studio | shaping clay",
+        "CRAFT_POTTERY | pottery studio | firing pots",
+        "TRADE | nearby | selling pottery",
+    ],
+    "Brewer":     [
+        "CRAFT | brewery | brewing ale",
+        "FETCH_WATER | well | drawing water for brewing",
+        "TRADE | nearby | selling drink",
+    ],
+    "Alchemist":  [
+        "RESEARCH | library | studying formulas",
+        "CRAFT | laboratory | mixing potions",
+        "FORAGE | herbs | gathering ingredients",
+    ],
+    "Hunter":     [
+        "TRACK | wilderness | tracking game",
+        "FIGHT | deer | hunting for food",
+        "TRAIN_ARCHERY | range | target practice",
+    ],
+    "Shepherd":   [
+        "TRAIN_ANIMAL | stable | herding sheep",
+        "MOVE_TO | pasture | watching the flock",
+        "FETCH_WATER | well | watering the animals",
+    ],
+    "Herbalist":  [
+        "FORAGE | herbs | gathering medicinal plants",
+        "RESEARCH | library | studying herbology",
+        "CRAFT | workshop | preparing remedies",
+    ],
+    "Mason":      [
+        "BUILD | wall | laying stonework",
+        "MINE_ROCK | nearby | quarrying stone",
+        "BUILD | wall | repairing walls",
+    ],
+    "Cook":       [
+        "CRAFT | kitchen | preparing meals",
+        "FETCH_WATER | well | getting water for cooking",
+        "FARM | harvest | checking food stores",
+    ],
+    "Bard":       [
+        "PERFORM | marketplace | entertaining the crowd",
+        "TALK_TO | nearby | collecting stories",
+        "RESEARCH | library | studying lore",
+    ],
+    "Servant":    [
+        "MOVE_TO | kitchen | preparing meals",
+        "FETCH_WATER | well | drawing water",
+        "MOVE_TO | common_room | cleaning and tidying",
+    ],
+    "Laborer":    [
+        "BUILD | floor | construction work",
+        "GATHER_FIREWOOD | forest | hauling supplies",
+        "MINE_ROCK | nearby | manual labor",
+    ],
+    "Builder":    [
+        "BUILD | wall | constructing buildings",
+        "BUILD | floor | laying foundations",
+        "CHOP_TREE | forest | getting building materials",
+    ],
+    "Soldier":    [
+        "TRAIN_COMBAT | training ground | drilling",
+        "GUARD_WALL | wall | standing watch",
+        "PATROL | village perimeter | patrol duty",
+    ],
+    "Captain":    [
+        "TRAIN_COMBAT | training ground | leading drills",
+        "PATROL | village perimeter | inspection rounds",
+        "GUARD_GATE | gate | supervising the guard",
+    ],
+    "Prospector": [
+        "MINE_ROCK | nearby | prospecting for ore",
+        "NAVIGATE | wilderness | exploring terrain",
+        "TRACK | hills | surveying mineral deposits",
+    ],
+    "Scribe":     [
+        "RESEARCH | library | copying manuscripts",
+        "MAKE_MAP | map room | updating records",
+        "RESEARCH | library | transcribing ledgers",
+    ],
+    "Barber":     [
+        "MOVE_TO | village | seeing clients",
+        "HEAL_OTHER | nearby | tending minor wounds",
+        "TALK_TO | nearby | socializing with clients",
+    ],
+    "Diplomat":   [
+        "TALK_TO | nearby | diplomatic discussions",
+        "RESEARCH | library | studying treaties",
+        "MOVE_TO | village | meeting with leaders",
+    ],
+    "Stablemaster": [
+        "TRAIN_ANIMAL | stable | grooming horses",
+        "FETCH_WATER | well | watering the animals",
+        "MOVE_TO | stable | mucking stalls",
+    ],
 }
 
 # Title-specific duty overrides — these REPLACE class actions when the NPC

@@ -22,6 +22,7 @@ from game.core.dialog_helpers import (
     _build_magic_talk, _build_heal_response, _build_bard_performance,
     _build_rogue_deal, _build_guard_report, _build_kingdom_report,
     _build_personal_quest, _build_quest_dialog, _build_help_dialog,
+    _build_personal_storyline,
     _skill_flavor, _build_teach_response, _build_lesson_text,
     _build_threat_response, _build_apology_response, _get_consciousness_dialog,
     # Emotion dialog
@@ -166,6 +167,13 @@ def build_dialog_tree(npc) -> Dict[str, DialogLine]:
     elif cc == "Warlock":
         greeting_responses.append(("Tell me about your patron.", "warlock_patron"))
 
+    # Job-specific dialog option (one unique option per profession)
+    from game.data.job_classes import JOB_DIALOG_OPTIONS
+    prof = ctx["prof"]
+    job_options = JOB_DIALOG_OPTIONS.get(prof, [])
+    for player_prompt, dialog_key, _npc_response in job_options:
+        greeting_responses.append((player_prompt, dialog_key))
+
     # Universal options
     if npc.shop_items:
         greeting_responses.append(("Show me your wares.", "shop"))
@@ -185,6 +193,22 @@ def build_dialog_tree(npc) -> Dict[str, DialogLine]:
             greeting_responses.insert(1, ("Have you got any work for me?", "quest_offer"))
     else:
         greeting_responses.append(("Is there anything I can help with?", "help_offer"))
+
+    # Colosseum / arena dialog options
+    from game.systems.colosseum_player import get_colosseum_dialog_options
+    for opt_text, opt_key in get_colosseum_dialog_options(npc, None):
+        greeting_responses.append((opt_text, opt_key))
+
+    # Mercenary hire options (at taverns/innkeepers)
+    from game.systems.mercenaries import get_mercenary_dialog_options
+    for opt_text, opt_key in get_mercenary_dialog_options(npc, None):
+        greeting_responses.append((opt_text, opt_key))
+
+    # Surrender dialog options (if nearby NPC has surrendered)
+    from game.systems.combat_depth import is_surrendered
+    if is_surrendered(npc):
+        greeting_responses.insert(0, ("I'll spare you. Get up.", "surrender_spare"))
+        greeting_responses.insert(1, ("Your time is up.", "surrender_finish"))
 
     # Needs-driven dialog options (NPC reveals their needs)
     if ctx["hunger"] < 30 and hasattr(npc, 'player_relationship'):
@@ -226,8 +250,14 @@ def build_dialog_tree(npc) -> Dict[str, DialogLine]:
         else:
             greeting_responses.append(("I need you to do something for me.", "task_assign"))
 
-    # Negative options (always available)
-    greeting_responses.append(("[Intimidate] Give me your gold.", "demand_gold"))
+    # Skill check options (always available)
+    from game.core.skill_checks import get_intimidate_dc, get_persuade_dc, get_deception_dc
+    _intim_dc = get_intimidate_dc(npc)
+    _pers_dc = get_persuade_dc(npc)
+    _dec_dc = get_deception_dc(npc)
+    greeting_responses.append((f"[Intimidate DC {_intim_dc}] Give me your gold.", "skill_intimidate"))
+    greeting_responses.append((f"[Persuade DC {_pers_dc}] I could really use a favor.", "skill_persuade"))
+    greeting_responses.append((f"[Deception DC {_dec_dc}] I'm on official business.", "skill_deceive"))
     greeting_responses.append(("[Threaten] You'd better watch yourself.", "threaten"))
 
     greeting_responses.append(("Farewell.", "goodbye"))
@@ -539,13 +569,15 @@ def build_dialog_tree(npc) -> Dict[str, DialogLine]:
     # Shop
     lines["shop"] = DialogLine(
         "Here's what I have available." if npc.shop_items else "I don't have a formal shop, but we could work something out.",
-        [("Let me browse.", "greeting"), ("Farewell.", "goodbye")])
+        [(f"[Persuade DC {_pers_dc}] How about a discount for a loyal customer?", "skill_persuade"),
+         ("Let me browse.", "greeting"), ("Farewell.", "goodbye")])
 
     # Quest offer
     lines["quest_offer"] = DialogLine(
         _build_quest_dialog(npc, cc, goals),
         [("I'll take the job!", "accept_quest"),
          ("What's the pay?", "quest_reward"),
+         (f"[Persuade DC {_pers_dc}] The reward seems low for this kind of work.", "skill_persuade"),
          ("Not right now.", "greeting")])
 
     # Help offer
@@ -571,9 +603,87 @@ def build_dialog_tree(npc) -> Dict[str, DialogLine]:
         [("What do you mean by that?", "greeting"),
          ("You're starting to scare me.", "goodbye")])
 
-    # === NEGATIVE INTERACTIONS ===
+    # === SKILL CHECK INTERACTIONS ===
+    # These use D20 + CHA modifier rolls. Results are pre-generated
+    # for both success and failure so the dialog tree is static.
+    # The actual roll happens when the player selects the option
+    # (handled by the game engine calling skill_checks module).
 
-    # Demand gold
+    from game.core.skill_checks import (
+        get_intimidate_dc, get_persuade_dc, get_deception_dc,
+    )
+    _intim_dc = get_intimidate_dc(npc)
+    _pers_dc = get_persuade_dc(npc)
+    _dec_dc = get_deception_dc(npc)
+
+    # Intimidate — D20 + CHA vs DC based on NPC bravery
+    lines["skill_intimidate"] = DialogLine(
+        f"[Skill Check: Intimidate vs DC {_intim_dc}]\n"
+        "*You step forward menacingly, hand on your weapon...*",
+        [("(Roll the dice)", "skill_intimidate_result")])
+    # Success/failure nodes filled by game engine after roll; defaults:
+    lines["skill_intimidate_success"] = DialogLine(
+        f"*stumbles back* F-fine! Take what you want, just don't hurt me!",
+        [("Hand over your gold.", "intimidate_take_gold"),
+         ("I was just proving a point. Keep it.", "apologize")])
+    lines["skill_intimidate_fail"] = DialogLine(
+        f"Ha! You think you can scare me? I'm a {cc} — I've faced worse!",
+        [("[Back down] Sorry, bad joke.", "apologize"),
+         ("[Press further] I mean it.", "threaten")])
+    lines["intimidate_take_gold"] = DialogLine(
+        "*hands over a pouch of coins, glaring*\nYou'll regret this.",
+        [("Pleasure doing business.", "goodbye")])
+
+    # Persuade — D20 + CHA vs DC based on relationship
+    lines["skill_persuade"] = DialogLine(
+        f"[Skill Check: Persuade vs DC {_pers_dc}]\n"
+        "*You put on your most charming smile...*",
+        [("(Roll the dice)", "skill_persuade_result")])
+    lines["skill_persuade_success"] = DialogLine(
+        "You know what? You seem like a trustworthy sort. "
+        "I'll see what I can do for you.",
+        [("Could I get a discount on your goods?", "persuade_discount"),
+         ("Any secrets you can share?", "persuade_info"),
+         ("Thanks, that's all I needed.", "greeting")])
+    lines["skill_persuade_fail"] = DialogLine(
+        "Nice try, but I wasn't born yesterday. You'll have to do "
+        "better than sweet words to convince me.",
+        [("Fair enough.", "greeting"),
+         ("Worth a shot.", "goodbye")])
+    lines["persuade_discount"] = DialogLine(
+        "Fine, fine. A small discount — 20% off, just this once. "
+        "Don't go spreading the word or everyone will want one.",
+        [("You're very generous. Show me your wares.", "shop"),
+         ("Much appreciated. Farewell.", "goodbye")])
+    lines["persuade_info"] = DialogLine(
+        "*leans in close* Alright, I'll tell you what I know, "
+        "but you didn't hear it from me...",
+        [("Go on, I'm listening.", "gossip"),
+         ("Your secret is safe with me.", "goodbye")])
+
+    # Deception — D20 + CHA vs DC based on NPC traits
+    lines["skill_deceive"] = DialogLine(
+        f"[Skill Check: Deception vs DC {_dec_dc}]\n"
+        "*You adopt an authoritative tone...*",
+        [("(Roll the dice)", "skill_deceive_result")])
+    lines["skill_deceive_success"] = DialogLine(
+        "Oh! My apologies, I didn't realize. Please forgive my rudeness. "
+        "How may I be of service?",
+        [("I need to inspect your goods.", "deceive_free_item"),
+         ("Tell me everything you know.", "local_news"),
+         ("At ease. Carry on.", "greeting")])
+    lines["skill_deceive_fail"] = DialogLine(
+        "Do you take me for a fool?! I can see right through your "
+        "lies! Get away from me before I call the guards!",
+        [("[Back down] Sorry, I misspoke.", "apologize"),
+         ("Fine, forget it.", "goodbye")])
+    lines["deceive_free_item"] = DialogLine(
+        "*nervously hands you something*\n"
+        "Here, take this — I hope everything is in order.",
+        [("Thank you, citizen. Carry on.", "goodbye"),
+         ("This will do. Dismissed.", "goodbye")])
+
+    # Legacy demand_gold (kept for backward compat, now routes via skill check)
     if npc.bravery < 0.4:
         lines["demand_gold"] = DialogLine(
             "P-please, don't hurt me! Here, take what I have, just leave me alone!",
@@ -863,6 +973,26 @@ def build_dialog_tree(npc) -> Dict[str, DialogLine]:
             lines["about_self"].responses.insert(-1,
                 ("Can I ask you something personal?", "deep_talk"))
 
+        # Personal storyline quest — profession-specific personal problem
+        storyline_text, storyline_data = _build_personal_storyline(npc, ctx)
+        if storyline_text and storyline_data:
+            lines["personal_story"] = DialogLine(
+                _body_language(ctx) + storyline_text,
+                [("I'll help you with that.", "personal_quest_accept"),
+                 ("That sounds rough. I wish I could help.", "greeting")])
+
+            reward_g = storyline_data.get("reward_gold", 50)
+            lines["personal_quest_accept"] = DialogLine(
+                f"You will? Thank you! I can offer you {reward_g} gold "
+                f"and my eternal gratitude. Be careful out there.",
+                [("I won't let you down.", "goodbye")])
+
+            # Add option to deep_talk and greeting
+            lines["deep_talk"].responses.insert(0,
+                ("Is something troubling you?", "personal_story"))
+            greeting_responses.append(
+                ("[Personal] You seem troubled...", "personal_story"))
+
     # Grudge/bond references
     if ctx["grudges"]:
         grudge_name, grudge_info = next(iter(ctx["grudges"].items()))
@@ -884,6 +1014,27 @@ def build_dialog_tree(npc) -> Dict[str, DialogLine]:
                     lines["friends_talk"].responses)
 
     # ================================================================
+    # JOB-SPECIFIC DIALOG NODES — unique to each profession
+    # ================================================================
+    # Quest-giving dialog keys get accept/decline responses;
+    # informational ones get generic responses.
+    _QUEST_DIALOG_KEYS = {
+        "guard_bounty_quest", "merchant_delivery_quest",
+        "scholar_investigation_quest",
+    }
+    for _player_prompt, dialog_key, npc_response in job_options:
+        if dialog_key in _QUEST_DIALOG_KEYS:
+            lines[dialog_key] = DialogLine(
+                npc_response,
+                [("I'll take care of it.", dialog_key),  # triggers mechanic
+                 ("Not right now.", "greeting")])
+        else:
+            lines[dialog_key] = DialogLine(
+                npc_response,
+                [("Thanks for the information.", "greeting"),
+                 ("Farewell.", "goodbye")])
+
+    # ================================================================
     # GOODBYE — varies by relationship, emotion, and class
     # ================================================================
     goodbye_text = _build_goodbye(ctx)
@@ -900,6 +1051,52 @@ def build_dialog_tree(npc) -> Dict[str, DialogLine]:
         "You want to give me something? That's very kind of you!",
         [("Here you go.", "gift"),  # intercepted by panels.py
          ("Actually, never mind.", "greeting")])
+
+    # ================================================================
+    # COLOSSEUM / ARENA DIALOG
+    # ================================================================
+    lines["arena_enter"] = DialogLine(
+        "You wish to fight in the arena? Bold! You'll face five rounds "
+        "of increasingly deadly foes. Win them all, and you earn the title "
+        "of Arena Champion. Defeat means you're dragged out. Ready?",
+        [("I'm ready. Let's fight!", "arena_start"),
+         ("What are the rewards?", "arena_rewards"),
+         ("Maybe later.", "greeting")])
+
+    lines["arena_start"] = DialogLine(
+        "Then step into the ring! The gates close behind you. "
+        "May the crowd's roar fuel your blade!",
+        [("For glory!", "goodbye")])
+
+    lines["arena_rewards"] = DialogLine(
+        "Each round pays gold: 10, 25, 50, 75, and 200 for the final boss. "
+        "Plus experience to sharpen your skills. The champion earns a title "
+        "that all will recognize.",
+        [("I'll do it!", "arena_start"),
+         ("Not today.", "greeting")])
+
+    lines["arena_forfeit"] = DialogLine(
+        "You wish to leave? No shame in living to fight another day. "
+        "The gates will open for you.",
+        [("Yes, let me out.", "goodbye"),
+         ("Actually, I'll keep fighting.", "greeting")])
+
+    lines["arena_champion"] = DialogLine(
+        "Hail, Champion! Your name echoes through these halls. "
+        "The crowd still chants for you. Will you defend your title?",
+        [("I'll fight again!", "arena_start"),
+         ("Just passing through.", "greeting")])
+
+    # ================================================================
+    # SURRENDER DIALOG
+    # ================================================================
+    lines["surrender_spare"] = DialogLine(
+        "Thank you... I yield. I won't forget your mercy.",
+        [("Go in peace.", "goodbye")])
+
+    lines["surrender_finish"] = DialogLine(
+        "No... please...",
+        [("It's over.", "goodbye")])
 
     return lines
 

@@ -126,8 +126,15 @@ def _memory_greeting(ctx) -> str:
 
 
 def _build_greeting(npc, cc, race, title, is_ruler, alignment, traits, ctx=None):
-    """Build greeting that reflects relationship, emotion, needs, time, weather, and memory."""
+    """Build greeting that reflects relationship, emotion, needs, time, weather, and memory.
+
+    Prioritizes job-specific greetings from JOB_GREETINGS, then falls back to
+    class-based greetings. Relationship level overrides both for extreme values.
+    """
+    from game.data.job_classes import JOB_GREETINGS
+
     name = npc.name
+    prof = npc.profession
     rel = ctx["rel"] if ctx else getattr(npc, 'player_relationship', 0)
     body = _body_language(ctx) if ctx else ""
     needs = _needs_comment(ctx) if ctx else ""
@@ -178,7 +185,7 @@ def _build_greeting(npc, cc, race, title, is_ruler, alignment, traits, ctx=None)
             close += f" {needs}"
         return close
 
-    # NEUTRAL greeting (default, -5 to 20) — class/title specific
+    # NEUTRAL greeting (default, -5 to 20) — job/class/title specific
     if is_ruler:
         base = f"{body}Welcome to my domain. I am {name}, ruler of these lands. What brings you before me?"
     elif title == "guard":
@@ -187,6 +194,10 @@ def _build_greeting(npc, cc, race, title, is_ruler, alignment, traits, ctx=None)
         base = f"{body}Well met, traveler. I am Sir {name}, sworn knight of this realm."
     elif title == "duke":
         base = f"{body}Greetings. I am {name}, duke of this territory."
+    elif prof in JOB_GREETINGS:
+        # Job-specific greeting — prioritized over class-based
+        template = random.choice(JOB_GREETINGS[prof])
+        base = body + template.format(name=name)
     else:
         class_greetings = {
             "Fighter": f"Hail, traveler! I'm {name}. You look like someone who can handle themselves.",
@@ -201,18 +212,10 @@ def _build_greeting(npc, cc, race, title, is_ruler, alignment, traits, ctx=None)
             "Monk": f"Peace be with you. I am {name}.",
             "Sorcerer": f"Oh! Sorry, didn't see you there. I'm {name}. Magic keeps me a bit... distracted.",
             "Warlock": f"You approach boldly. I'm {name}. Most people give me a wider berth.",
-            # Civilian professions
-            "Merchant": f"Welcome to my shop! I'm {name}. Looking to buy or sell?",
-            "Baker": f"Hello there! I'm {name}. Fresh bread just out of the oven.",
-            "Innkeeper": f"Welcome, traveler! I'm {name}. Need a room, a meal, or just good company?",
-            "Healer": f"Greetings. I'm {name}. Are you hurt? I can help.",
-            "Farmer": f"*wipes dirt from hands* Oh, hello. I'm {name}. Don't mind the mess.",
-            "Blacksmith": f"*sets down hammer* What can I forge for you? Name's {name}.",
-            "Alchemist": f"Careful around the bottles. I'm {name}. Need a potion?",
+            "Commoner": f"Hello there. I'm {name}, just a simple {prof.lower()}.",
         }
-        # Try class first, then profession
-        base = class_greetings.get(cc, class_greetings.get(
-            npc.profession, f"{body}Hello there. I'm {name}, a {race} {cc}."))
+        base = class_greetings.get(cc,
+            f"{body}Hello there. I'm {name}, a {prof.lower()} around here.")
         base = body + base
 
     # Append memory, needs, and profession context
@@ -230,7 +233,11 @@ def _build_about_self(npc, cc, race, goals, friends, enemies, traits, age, align
     from game.ai.npc_voice import get_alignment_response_filtered, get_goals_response_filtered
     player_rel = getattr(npc, 'player_relationship', 0)
 
-    text = f"I'm {npc.name}, a {race} {cc}."
+    prof = npc.profession
+    if prof and prof != cc:
+        text = f"I'm {npc.name}, a {race} {prof.lower()} by trade."
+    else:
+        text = f"I'm {npc.name}, a {race} {cc}."
     if age < 20: text += " Still young, but I've already seen more than most."
     elif age > 60: text += f" I've lived {age} years and learned a few things along the way."
 
@@ -341,7 +348,11 @@ def _build_generic_backstory(cc, race, age):
         "Druid": "The spirits of the forest chose me. I've been their guardian ever since.",
         "Bard": "I've traveled far and wide, collecting stories. Everyone has a tale worth telling.",
     }
-    return stories.get(cc, f"I've lived in these parts for most of my {age} years. It's been... eventful.")
+    return stories.get(cc,
+        f"I've lived in these parts for most of my {age} years. "
+        "It's been... eventful." if cc != "Commoner" else
+        f"I've worked with my hands all my life. {age} years of honest labor. "
+        "It's a simple life, but it's mine.")
 
 
 
@@ -483,7 +494,8 @@ def _build_help_dialog(cc, goals, known):
         "Rogue": "I know where treasure is hidden, but I need a partner. Interested in a joint venture?",
         "Paladin": "Evil festers in the ruins nearby. Help me cleanse it and protect the innocent.",
     }
-    return responses.get(cc, "There's always work that needs doing. What are you good at?")
+    return responses.get(cc,
+        "There's always work that needs doing around here. What are you good at?")
 
 
 
@@ -846,8 +858,26 @@ def _build_goodbye(ctx):
             "Take care. And remember, you've got an ally here.",
         ])
 
-    # Neutral with class flavor
-    goodbyes = {
+    # Neutral with class flavor — try profession first, then class
+    prof_goodbyes = {
+        "Guard": "Stay out of trouble, citizen.",
+        "Farmer": "Mind the crops if you pass through the fields.",
+        "Merchant": "Come back when you need supplies!",
+        "Baker": "Don't forget to eat! Fresh bread awaits.",
+        "Innkeeper": "Room's always ready if you need rest.",
+        "Healer": "Stay healthy out there.",
+        "Blacksmith": "Keep your gear in good shape out there.",
+        "Hunter": "Watch for tracks. They'll tell you everything.",
+        "Fisherman": "If you're by the water, try your luck with a line.",
+        "Miner": "Watch your step underground.",
+        "Woodcutter": "Good timber waits for no one.",
+        "Scholar": "May you find the answers you seek.",
+        "Soldier": "Stay sharp out there.",
+        "Captain": "Dismissed. Stay safe.",
+        "Alchemist": "Don't drink anything you find in the wild.",
+        "Herbalist": "Nature provides, if you know where to look.",
+    }
+    class_goodbyes = {
         "Fighter": "Keep your blade sharp, traveler.",
         "Wizard": "May knowledge light your path.",
         "Cleric": "The gods watch over you. Go in peace.",
@@ -860,12 +890,10 @@ def _build_goodbye(ctx):
         "Monk": "Walk the path with mindfulness.",
         "Sorcerer": "Be careful with power. It has a mind of its own.",
         "Warlock": "Watch the shadows. They watch you.",
-        "Merchant": "Come back when you need supplies!",
-        "Baker": "Don't forget to eat! Fresh bread awaits.",
-        "Innkeeper": "Room's always ready if you need rest.",
-        "Healer": "Stay healthy out there.",
+        "Commoner": "Take care of yourself out there.",
     }
-    base = goodbyes.get(cc, goodbyes.get(ctx["prof"], "Safe travels, friend. Come back anytime."))
+    base = prof_goodbyes.get(ctx["prof"],
+        class_goodbyes.get(cc, "Safe travels, friend. Come back anytime."))
 
     # Emotion modifier
     if emotion == "sadness" and ctx["emotion_intensity"] > 0.3:
@@ -873,4 +901,182 @@ def _build_goodbye(ctx):
     elif emotion == "joy" and ctx["emotion_intensity"] > 0.3:
         base += " *waves cheerfully*"
     return base
+
+
+# ================================================================
+# PERSONAL STORYLINE QUESTS (unlock at relationship > 30)
+# ================================================================
+
+# Each profession has a unique personal problem and quest type.
+# NPCs only offer one personal quest ever (tracked via npc._personal_quest_offered).
+
+PERSONAL_STORYLINES = {
+    "Guard": {
+        "dialog": "*lowers voice* Bandits killed my brother on the north "
+                  "road last season. I know where their camp is but I "
+                  "can't leave my post. Will you bring them to justice?",
+        "quest_title": "Avenge the Fallen Guard",
+        "quest_desc": "Hunt down the bandits who killed the guard's brother. "
+                      "Find their camp and eliminate the threat.",
+        "quest_kind": "bounty_hunt",
+        "quest_target": "bandit",
+        "quest_count": 3,
+        "reward_gold": 60,
+        "reward_xp": 50,
+        "difficulty": "medium",
+    },
+    "Farmer": {
+        "dialog": "*sighs* My crops are failing. Blight hit the fields "
+                  "and nothing I've tried works. The herbalist in the "
+                  "next settlement might know a cure, but I need someone "
+                  "to fetch the remedy — I can't leave my land.",
+        "quest_title": "Cure the Crop Blight",
+        "quest_desc": "Find the herbalist and bring back a remedy for "
+                      "the crop blight devastating the farmer's fields.",
+        "quest_kind": "fetch",
+        "quest_target": "Blight Remedy",
+        "quest_count": 1,
+        "reward_gold": 35,
+        "reward_xp": 30,
+        "difficulty": "easy",
+    },
+    "Merchant": {
+        "dialog": "*glances around nervously* I'm being extorted. A gang "
+                  "of thugs demands 'protection money' every week. If I "
+                  "don't pay, they wreck my stall. I need someone to "
+                  "convince them to stop. Permanently.",
+        "quest_title": "End the Extortion Racket",
+        "quest_desc": "Deal with the thugs extorting the merchant. "
+                      "Eliminate or drive off their gang.",
+        "quest_kind": "kill",
+        "quest_target": "thug",
+        "quest_count": 4,
+        "reward_gold": 75,
+        "reward_xp": 55,
+        "difficulty": "medium",
+    },
+    "Blacksmith": {
+        "dialog": "I found a vein of star-metal in the old mine, but "
+                  "creatures have infested the tunnels. If someone could "
+                  "clear them out and bring me a sample of the ore... "
+                  "I'd forge you something legendary.",
+        "quest_title": "Star-Metal Expedition",
+        "quest_desc": "Clear the mine of creatures and retrieve a sample "
+                      "of rare star-metal ore for the blacksmith.",
+        "quest_kind": "fetch",
+        "quest_target": "Star-Metal Ore",
+        "quest_count": 1,
+        "reward_gold": 50,
+        "reward_xp": 60,
+        "difficulty": "hard",
+    },
+    "Healer": {
+        "dialog": "A plague is coming. I can feel it. I need moonpetal "
+                  "flowers from the deep forest — they only bloom at "
+                  "night near ancient trees. Without them, people will "
+                  "die. Please, I need your help.",
+        "quest_title": "Moonpetal Harvest",
+        "quest_desc": "Gather moonpetal flowers from the deep forest "
+                      "at night so the healer can prepare plague medicine.",
+        "quest_kind": "fetch",
+        "quest_target": "Moonpetal Flower",
+        "quest_count": 5,
+        "reward_gold": 40,
+        "reward_xp": 35,
+        "difficulty": "medium",
+    },
+    "Scholar": {
+        "dialog": "I've been translating an ancient text that references "
+                  "a hidden library beneath the ruins east of here. The "
+                  "knowledge inside could change everything we know about "
+                  "the old world. But the ruins are dangerous...",
+        "quest_title": "The Hidden Library",
+        "quest_desc": "Explore the ruins and find the ancient library "
+                      "mentioned in the scholar's texts.",
+        "quest_kind": "investigate",
+        "quest_target": "ancient library",
+        "quest_count": 1,
+        "reward_gold": 80,
+        "reward_xp": 70,
+        "difficulty": "hard",
+    },
+    "Innkeeper": {
+        "dialog": "A traveler left behind a sealed letter before he "
+                  "vanished. It mentions a treasure buried near the old "
+                  "bridge. I'd look myself but... running an inn doesn't "
+                  "leave time for treasure hunts.",
+        "quest_title": "The Vanished Traveler's Treasure",
+        "quest_desc": "Follow the clues in the traveler's letter to "
+                      "find the buried treasure near the old bridge.",
+        "quest_kind": "investigate",
+        "quest_target": "treasure",
+        "quest_count": 1,
+        "reward_gold": 55,
+        "reward_xp": 40,
+        "difficulty": "medium",
+    },
+    "Hunter": {
+        "dialog": "There's a beast in the deep woods — bigger than "
+                  "anything I've ever tracked. Killed two of my dogs. "
+                  "I can't let it keep terrorizing the forest. Will you "
+                  "help me hunt it down?",
+        "quest_title": "The Great Beast Hunt",
+        "quest_desc": "Track and slay the massive predator terrorizing "
+                      "the deep woods.",
+        "quest_kind": "kill",
+        "quest_target": "great beast",
+        "quest_count": 1,
+        "reward_gold": 65,
+        "reward_xp": 60,
+        "difficulty": "hard",
+    },
+    "Baker": {
+        "dialog": "Rats. Giant ones. They've infested my grain cellar "
+                  "and I can hear them gnawing through the walls at "
+                  "night. If I lose my grain stores, the whole village "
+                  "goes hungry this winter.",
+        "quest_title": "Cellar Infestation",
+        "quest_desc": "Clear out the giant rats infesting the baker's "
+                      "grain cellar before the stores are ruined.",
+        "quest_kind": "kill",
+        "quest_target": "giant rat",
+        "quest_count": 6,
+        "reward_gold": 25,
+        "reward_xp": 20,
+        "difficulty": "easy",
+    },
+    "Miner": {
+        "dialog": "We broke into a new cavern last week and... "
+                  "something's down there. Glowing eyes in the dark. "
+                  "Two miners haven't come back. I need someone brave "
+                  "enough to go in and find them.",
+        "quest_title": "Rescue in the Deep",
+        "quest_desc": "Descend into the newly opened cavern, rescue "
+                      "the missing miners, and deal with whatever lurks below.",
+        "quest_kind": "investigate",
+        "quest_target": "missing miners",
+        "quest_count": 2,
+        "reward_gold": 55,
+        "reward_xp": 50,
+        "difficulty": "medium",
+    },
+}
+
+
+def _build_personal_storyline(npc, ctx):
+    """Build personal storyline dialog for high-relationship NPCs.
+
+    Returns (dialog_text, quest_data) or (None, None) if no storyline
+    is available. Each NPC only offers one personal quest.
+    """
+    # Check if already offered
+    if getattr(npc, '_personal_quest_offered', False):
+        return None, None
+
+    prof = ctx["prof"]
+    storyline = PERSONAL_STORYLINES.get(prof)
+    if not storyline:
+        return None, None
+
+    return storyline["dialog"], storyline
 

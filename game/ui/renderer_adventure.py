@@ -16,8 +16,14 @@ from game.world.world import World
 from game.ui.character_anim import get_anim, update_anim, draw_npc_body, draw_creature_body
 from game.ui.player_anim import draw_player_body
 from game.ui.mount_render import is_mounted, draw_mounted_entity
+from game.ui.combat_effects import CombatEffects
 from game.world.camera import Camera
 from game.core.player import Player
+from game.ui.water_render import (
+    classify_water_tile, build_water_tile_variants, build_wave_frames,
+    build_shore_foam_overlays, get_land_neighbor_mask,
+    build_flow_arrows, get_flow_direction,
+)
 
 TS = 32  # tile size for adventure mode
 
@@ -43,10 +49,22 @@ class AdventureRenderer:
         self._build_tile_cache()
         self._build_roof_cache()
 
+        # Water depth variant tiles (shallow/normal/deep + animation)
+        self._water_base_variants = build_water_tile_variants(TS)
+        self._water_wave_frames = build_wave_frames(
+            self._water_base_variants, TS, num_frames=3)
+        self._water_anim_tick: int = 0
+        # Shore foam overlays and flow indicators
+        self._shore_foam = build_shore_foam_overlays(TS, num_frames=3)
+        self._flow_arrows = build_flow_arrows(TS, num_frames=3)
+
         self.minimap_surface = None
         self.minimap_explored = None
         self.night_surface = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
         self.particles = []
+
+        # Combat visual effects (damage popups, hit flashes, death, HP bars)
+        self.combat_fx = CombatEffects()
 
         # Caches
         self._exterior_doors = None
@@ -596,6 +614,7 @@ class AdventureRenderer:
 
     def draw_world(self, world, camera, visible_tiles=None, player=None):
         T = self.tile_size
+        self._water_anim_tick += 1
         x0, y0, x1, y1 = camera.get_visible_tile_range()
 
         # Floor level and building tracking
@@ -670,13 +689,48 @@ class AdventureRenderer:
                             self.screen.blit(roof, (sx, sy))
                             continue
 
-                    # Dim exterior when on non-ground floor
-                    tile_surf = self._tile_cache.get(tile_type)
+                    # Dynamic water: classify depth by neighbors
+                    _is_water = False
+                    try:
+                        if tile_type == WATER:
+                            _is_water = True
+                            wclass = classify_water_tile(
+                                world.tiles, x, y, world.width, world.height)
+                            frame_idx = (self._water_anim_tick // 30
+                                         + x + y) % 3
+                            tile_surf = self._water_wave_frames.get(
+                                (wclass, frame_idx))
+                            if not tile_surf:
+                                tile_surf = self._water_base_variants.get(wclass)
+                        else:
+                            tile_surf = self._tile_cache.get(tile_type)
+                    except Exception:
+                        tile_surf = None
                     if tile_surf:
                         self.screen.blit(tile_surf, (sx, sy))
                     else:
                         color = TERRAIN_COLORS.get(tile_type, (80, 80, 80))
                         pygame.draw.rect(self.screen, color, (sx, sy, T, T))
+
+                    # Shore foam + flow overlays for water tiles
+                    if _is_water:
+                        land_mask = get_land_neighbor_mask(
+                            world.tiles, x, y, world.width, world.height)
+                        if land_mask:
+                            for bit in range(4):
+                                if land_mask & (1 << bit):
+                                    foam = self._shore_foam.get(
+                                        (bit, frame_idx))
+                                    if foam:
+                                        self.screen.blit(foam, (sx, sy))
+                        # Flow indicators for narrow water bodies
+                        flow = get_flow_direction(
+                            world.tiles, x, y, world.width, world.height)
+                        if flow:
+                            arrow = self._flow_arrows.get(
+                                (flow[0], flow[1], frame_idx))
+                            if arrow:
+                                self.screen.blit(arrow, (sx, sy))
 
                 elif explored:
                     # Underground: explored surface tiles must be black
@@ -702,6 +756,11 @@ class AdventureRenderer:
                     dimmed = self._dimmed_cache.get(tile_type)
                     if dimmed:
                         self.screen.blit(dimmed, (sx, sy))
+                    else:
+                        # Fallback for explored tile without cached surface
+                        fallback_color = TERRAIN_COLORS.get(tile_type, (80, 80, 80))
+                        fc = tuple(c // 2 for c in fallback_color)
+                        pygame.draw.rect(self.screen, fc, (sx, sy, T, T))
                 else:
                     pygame.draw.rect(self.screen, (5, 5, 10), (sx, sy, T, T))
 
@@ -796,7 +855,15 @@ class AdventureRenderer:
         s = T // 4  # scale factor (32//4 = 8)
         dt = getattr(self, '_last_dt', 0.016)
 
+        # Distance culling: skip entities far outside visible tile range
+        vx0, vy0, vx1, vy1 = camera.get_visible_tile_range()
+        cull_margin = 5
+
         for npc in npcs:
+            # Early tile-range cull before expensive world_to_screen
+            if (npc.x < vx0 - cull_margin or npc.x > vx1 + cull_margin or
+                    npc.y < vy0 - cull_margin or npc.y > vy1 + cull_margin):
+                continue
             if visible_tiles and (int(npc.x), int(npc.y)) not in visible_tiles:
                 continue
             sx, sy = camera.world_to_screen(npc.x, npc.y)
@@ -839,8 +906,16 @@ class AdventureRenderer:
         s = T // 4  # scale factor (32//4 = 8)
         dt = getattr(self, '_last_dt', 0.016)
 
+        # Distance culling: skip entities far outside visible tile range
+        vx0, vy0, vx1, vy1 = camera.get_visible_tile_range()
+        cull_margin = 5
+
         for creature in creatures:
             if not creature.alive:
+                continue
+            # Early tile-range cull before expensive world_to_screen
+            if (creature.x < vx0 - cull_margin or creature.x > vx1 + cull_margin or
+                    creature.y < vy0 - cull_margin or creature.y > vy1 + cull_margin):
                 continue
             if visible_tiles and (int(creature.x), int(creature.y)) not in visible_tiles:
                 continue
@@ -923,9 +998,84 @@ class AdventureRenderer:
                                 (int(sx), int(sy), T, T), 2)
 
     def draw_night_overlay(self, darkness):
+        """Legacy wrapper — delegates to draw_lighting for smooth transitions."""
         if darkness <= 0:
             return
-        self.night_surface.fill((0, 0, 20, int(darkness * 180)))
+        if darkness >= 0.99:
+            approx_time = 0.0  # midnight
+        elif darkness > 0:
+            approx_time = 0.75 + darkness * 0.083
+        else:
+            approx_time = 0.5
+        self.draw_lighting(approx_time)
+
+    def draw_lighting(self, game_time_normalized: float,
+                      camera=None, world=None):
+        """Draw day/night overlay with gradual dawn/dusk transitions."""
+        t = game_time_normalized
+        dawn_start  = 5.0 / 24.0
+        dawn_end    = 7.0 / 24.0
+        morning_end = 10.0 / 24.0
+        afternoon   = 14.0 / 24.0
+        dusk_start  = 17.0 / 24.0
+        dusk_end    = 19.0 / 24.0
+        evening_end = 21.0 / 24.0
+
+        if morning_end <= t < afternoon:
+            return  # peak midday
+
+        if dawn_end <= t < morning_end:
+            progress = (t - dawn_end) / (morning_end - dawn_end)
+            alpha = int(20 * (1.0 - progress))
+            if alpha <= 2:
+                return
+            overlay_color = (180, 140, 60, alpha)
+        elif afternoon <= t < dusk_start:
+            progress = (t - afternoon) / (dusk_start - afternoon)
+            alpha = int(18 * progress)
+            if alpha <= 2:
+                return
+            overlay_color = (180, 130, 50, alpha)
+        elif dawn_start <= t < dawn_end:
+            progress = (t - dawn_start) / (dawn_end - dawn_start)
+            alpha = int(50 * (1.0 - progress)
+                        + 120 * max(0, 0.5 - progress))
+            alpha = max(0, min(alpha, 110))
+            r_c = int(220 * (1.0 - progress * 0.6))
+            g_c = int(140 * (1.0 - progress * 0.4))
+            b_c = int(40 * (1.0 - progress))
+            overlay_color = (r_c, g_c, b_c, alpha)
+        elif dusk_start <= t < dusk_end:
+            progress = (t - dusk_start) / (dusk_end - dusk_start)
+            alpha = int(30 + 90 * progress)
+            r_c = int(200 * (1.0 - progress * 0.7) + 40 * progress)
+            g_c = int(110 * (1.0 - progress * 0.8))
+            b_c = int(50 + 40 * progress)
+            overlay_color = (r_c, g_c, b_c, alpha)
+        elif dusk_end <= t < evening_end:
+            progress = (t - dusk_end) / (evening_end - dusk_end)
+            alpha = int(120 + 30 * progress)
+            r_c = int(40 * (1.0 - progress) + 10 * progress)
+            g_c = int(25 * (1.0 - progress) + 10 * progress)
+            b_c = int(70 * (1.0 - progress) + 50 * progress)
+            overlay_color = (r_c, g_c, b_c, alpha)
+        else:
+            alpha = 150
+            overlay_color = (10, 10, 50, alpha)
+
+        self.night_surface.fill(overlay_color)
+
+        if alpha > 20:
+            cx, cy = SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2
+            light_radius = max(60, int(200 * (1.0 - alpha / 300.0)))
+            for rad in range(light_radius, 0, -4):
+                a = int(alpha * (rad / light_radius) ** 0.5)
+                pygame.draw.circle(
+                    self.night_surface,
+                    (overlay_color[0], overlay_color[1],
+                     overlay_color[2], a),
+                    (cx, cy), rad)
+
         self.screen.blit(self.night_surface, (0, 0))
 
     def draw_world_events(self, events, camera):

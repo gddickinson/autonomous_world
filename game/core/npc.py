@@ -37,16 +37,29 @@ class DialogLine:
 
 class NPC(Entity):
     """A non-player character with D&D class, race, and personality."""
+
+    # --- Gold is always stored as int to avoid fractional display values ---
+    @property
+    def npc_gold(self) -> int:
+        return self._npc_gold
+
+    @npc_gold.setter
+    def npc_gold(self, value):
+        self._npc_gold = int(value)
+
     def __init__(self, x: float, y: float, name: str, profession: str,
                  char_class: str = "", race: str = "", level: int = 1):
         super().__init__(x, y)
         self.name = name
         self.profession = profession  # kept for backward compat
 
-        # D&D class and race
-        if not char_class or not race:
+        # D&D class and race — derive class from profession when possible
+        if not char_class:
+            from game.data.job_classes import get_class_for_job
+            char_class = get_class_for_job(profession)
+        if not race:
             from game.data.dnd import random_npc_class_and_race
-            char_class, race = random_npc_class_and_race()
+            _, race = random_npc_class_and_race()
         self.char_class = char_class
         self.race = race
         self.level = level
@@ -76,6 +89,7 @@ class NPC(Entity):
             "Rogue": (100, 100, 110), "Ranger": (80, 140, 80), "Paladin": (180, 160, 100),
             "Barbarian": (160, 100, 80), "Bard": (160, 120, 160), "Druid": (80, 140, 100),
             "Monk": (150, 140, 120), "Sorcerer": (140, 80, 160), "Warlock": (120, 80, 140),
+            "Commoner": (130, 120, 110),
         }
         base = class_colors.get(char_class, (130, 130, 130))
         self.color = (base[0] + random.randint(-20, 20), base[1] + random.randint(-20, 20),
@@ -349,7 +363,28 @@ class NPC(Entity):
             make_item("Mushrooms"), make_item("Flowers"),
         ]
 
+    # -- Death cleanup --
+
+    def _on_death(self):
+        """Clear all action/movement state when NPC dies."""
+        super()._on_death()
+        self.current_action = "dead"
+        self.current_goal = ""
+        self.state = "dead"
+        self.target_x = None
+        self.target_y = None
+        self.combat_target = None
+        self.action_timer = 0.0
+        self.state_timer = 0.0
+        self.wants_to_talk = False
+        self.pending_llm_decision = False
+
     # -- Needs / Inventory helpers --
+
+    @property
+    def job(self) -> str:
+        """Return the NPC's profession/role (alias for profession)."""
+        return self.profession or "unknown"
 
     @property
     def backstory(self):
@@ -756,6 +791,8 @@ class NPC(Entity):
 
     def update(self, dt: float, world, game_time: float):
         """Update NPC behavior."""
+        if not self.alive:
+            return
         self.state_timer -= dt
 
         # Magic system: mana regen, cooldowns, spell effects
@@ -943,6 +980,13 @@ class NPC(Entity):
                 "Bargain for greater arcane secrets",
             ],
         }
+
+        goal_templates["Commoner"] = [
+            "Save enough gold to buy a better home",
+            "Provide for my family and neighbors",
+            "Master my trade and earn respect",
+            "Keep the settlement safe and prosperous",
+        ]
 
         templates = goal_templates.get(self.char_class, ["explore the world", "survive"])
         self.long_term_goals = random.sample(templates, min(2, len(templates)))

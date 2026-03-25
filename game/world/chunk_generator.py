@@ -20,6 +20,8 @@ from typing import List, Tuple
 
 from game.settings import *
 from game.world.chunk import Chunk, CHUNK_SIZE
+from game.world.dungeon_gen import generate_dungeon_for_location
+from game.world.furnish import furnish_building
 
 
 def generate_chunk(chunk: Chunk, plan) -> None:
@@ -33,8 +35,8 @@ def generate_chunk(chunk: Chunk, plan) -> None:
     y0 = cy * CHUNK_SIZE
 
     # Deterministic RNG for this chunk
-    chunk_seed = plan.seed ^ (cx * 374761393 + cy * 668265263)
-    rng = random.Random(chunk_seed)
+    chunk_seed = int(plan.seed) ^ (cx * 374761393 + cy * 668265263)
+    rng = random.Random(int(chunk_seed))
 
     # 1. Base terrain
     _generate_terrain(chunk, plan, x0, y0)
@@ -65,7 +67,17 @@ def generate_chunk(chunk: Chunk, plan) -> None:
 # ================================================================
 
 def _generate_terrain(chunk: Chunk, plan, x0: int, y0: int):
-    """Generate base terrain tiles from FBM noise (vectorized with numpy)."""
+    """Generate base terrain tiles from noise (vectorized with numpy).
+
+    If USE_NEW_TERRAIN is enabled, uses the volcanic island terrain system
+    with Whittaker biomes. Otherwise falls back to legacy FBM + radial falloff.
+    """
+    if USE_NEW_TERRAIN:
+        from game.world.terrain_gen import generate_terrain_new
+        generate_terrain_new(chunk.tiles, plan, x0, y0, CHUNK_SIZE)
+        return
+
+    # --- Legacy terrain (circular island with simple thresholds) ---
     tiles = chunk.tiles
     w = plan.width
     h = plan.height
@@ -207,8 +219,9 @@ def _stamp_special_locations(chunk: Chunk, plan, x0: int, y0: int,
     y1 = y0 + CHUNK_SIZE
 
     # Which kinds go before vs after settlements
-    before_kinds = {"test_island", "temple", "ruins"}
-    after_kinds = {"test_building", "colosseum"}
+    # Ruins and dungeons go AFTER settlements/roads so STAIRS_DOWN isn't overwritten
+    before_kinds = {"test_island", "temple"}
+    after_kinds = {"test_building", "colosseum", "ruins", "dungeon"}
 
     wanted = before_kinds if before_settlements else after_kinds
 
@@ -227,6 +240,8 @@ def _stamp_special_locations(chunk: Chunk, plan, x0: int, y0: int,
             _stamp_test_building(tiles, loc, x0, y0)
         elif loc.kind == "ruins":
             _stamp_ruins(tiles, loc, x0, y0, plan.seed)
+        elif loc.kind == "dungeon":
+            _stamp_dungeon_entrance(tiles, loc, x0, y0, plan.seed)
         elif loc.kind == "colosseum":
             _stamp_colosseum(tiles, loc, x0, y0)
 
@@ -440,10 +455,11 @@ def _stamp_test_building(tiles, loc, x0: int, y0: int):
 
 
 def _stamp_ruins(tiles, loc, x0: int, y0: int, seed: int):
-    """Stamp a small ruin structure."""
+    """Stamp a small ruin structure with dungeon entrance (STAIRS_DOWN)."""
     rng = random.Random(seed ^ (loc.x * 31 + loc.y * 97))
     r = loc.radius
 
+    stairs_placed = False
     for ly in range(CHUNK_SIZE):
         wy = y0 + ly
         dy = wy - loc.y
@@ -456,6 +472,20 @@ def _stamp_ruins(tiles, loc, x0: int, y0: int, seed: int):
                     tiles[ly, lx] = WALL if rng.random() < 0.5 else FLOOR
                 else:
                     tiles[ly, lx] = FLOOR
+                # Place stairs at the ruin centre
+                if dx == 0 and dy == 0 and not stairs_placed:
+                    tiles[ly, lx] = STAIRS_DOWN
+                    stairs_placed = True
+
+    # Lazily generate the dungeon layout for this ruin
+    if loc.dungeon is None:
+        loc.dungeon = generate_dungeon_for_location(
+            loc.x, loc.y, seed)
+
+
+def _stamp_dungeon_entrance(tiles, loc, x0: int, y0: int, seed: int):
+    """Stamp a dungeon-type special location (like ruins but always has stairs)."""
+    _stamp_ruins(tiles, loc, x0, y0, seed)
 
 
 # ================================================================
@@ -519,6 +549,24 @@ def _stamp_settlements(chunk: Chunk, plan, x0: int, y0: int,
                                    DENSE_FOREST, SWAMP):
                         tiles[ly, lx] = GRASS
 
+        # Clear forest in the extended cleared_radius area (beyond walls)
+        cleared_r = getattr(layout, 'cleared_radius', 0) if layout else 0
+        if cleared_r > sp.radius:
+            cr_sq = cleared_r * cleared_r
+            for ly in range(CHUNK_SIZE):
+                wy = y0 + ly
+                dy = wy - sp.y
+                if abs(dy) > cleared_r:
+                    continue
+                for lx in range(CHUNK_SIZE):
+                    wx = x0 + lx
+                    dx = wx - sp.x
+                    dist_sq = dx * dx + dy * dy
+                    if sp.radius * sp.radius < dist_sq <= cr_sq:
+                        current = tiles[ly, lx]
+                        if current in (FOREST, DENSE_FOREST):
+                            tiles[ly, lx] = GRASS
+
         # Stamp roads from layout (or fallback to cross-roads)
         if layout and layout.roads:
             _stamp_settlement_roads(tiles, layout.roads, x0, y0, sp)
@@ -536,11 +584,7 @@ def _stamp_settlements(chunk: Chunk, plan, x0: int, y0: int,
                                 tiles[ly, lx] == GRASS):
                             tiles[ly, lx] = ROAD
 
-        # Stamp walls and defenses
-        if layout and layout.defenses:
-            _stamp_settlement_defenses(tiles, layout.defenses, x0, y0)
-
-        # Stamp farms
+        # Stamp farms (before buildings/walls so they don't overwrite)
         if layout and layout.farms:
             _stamp_settlement_farms(tiles, layout.farms, x0, y0)
 
@@ -553,7 +597,7 @@ def _stamp_settlements(chunk: Chunk, plan, x0: int, y0: int,
                     if tiles[ly, lx] in (GRASS, ROAD):
                         tiles[ly, lx] = WELL
 
-        # Stamp each building's blueprint tiles
+        # Stamp buildings BEFORE walls so defensive walls render on top
         for bld in sp.buildings:
             bp_tiles = bld.get("bp_tiles")
             bx, by = bld["x"], bld["y"]
@@ -593,6 +637,12 @@ def _stamp_settlements(chunk: Chunk, plan, x0: int, y0: int,
                                 tiles[ly, lx] = WALL
                         else:
                             tiles[ly, lx] = FLOOR
+                # Add profession-specific furniture to the box interior
+                furnish_building(tiles, bld, x0, y0)
+
+        # Stamp walls and defenses AFTER buildings so walls are visible
+        if layout and layout.defenses:
+            _stamp_settlement_defenses(tiles, layout.defenses, x0, y0)
 
         # Specialization-specific terrain post-processing
         _stamp_specialization_features(tiles, sp, x0, y0, plan, rng)
@@ -740,12 +790,17 @@ def _stamp_settlement_roads(tiles, roads, x0, y0, sp):
     """Stamp planned settlement roads into the chunk."""
     road_tile_map = {
         "cobblestone": COBBLESTONE,
+        "main": COBBLESTONE,
         "road": ROAD,
+        "gravel": GRAVEL_ROAD,
         "gravel_road": GRAVEL_ROAD,
+        "dirt": DIRT_TRACK,
         "dirt_track": DIRT_TRACK,
+        "forest_path": DIRT_TRACK,
+        "stone_road": COBBLESTONE,
     }
 
-    no_overwrite = (WALL, FLOOR, DOOR, WATER, SHALLOW_WATER)
+    no_overwrite = (WALL, BUILT_WALL, FLOOR, DOOR, WATER, SHALLOW_WATER)
 
     for x1, y1, x2, y2, road_type in roads:
         road_tile = road_tile_map.get(road_type, ROAD)
@@ -766,36 +821,107 @@ def _stamp_settlement_roads(tiles, roads, x0, y0, sp):
 
 
 def _stamp_settlement_defenses(tiles, defense, x0, y0):
-    """Stamp walls, towers, and gates from defense plan."""
-    # Stamp wall points
-    for wx, wy in defense.wall_points:
-        lx = wx - x0
-        ly = wy - y0
-        if 0 <= lx < CHUNK_SIZE and 0 <= ly < CHUNK_SIZE:
-            if tiles[ly, lx] not in (FLOOR, DOOR):
-                tiles[ly, lx] = WALL
+    """Stamp walls, towers, gates, and moat from defense plan.
 
-    # Stamp gate openings (3 tiles wide)
-    for gx, gy, direction in defense.gate_positions:
-        for offset in range(-1, 2):
-            if direction in ("north", "south"):
-                wx, wy = gx + offset, gy
-            else:
-                wx, wy = gx, gy + offset
-            lx = wx - x0
-            ly = wy - y0
-            if 0 <= lx < CHUNK_SIZE and 0 <= ly < CHUNK_SIZE:
-                tiles[ly, lx] = ROAD
+    Uses BUILT_WALL for defensive walls (distinct from building WALL).
+    Walls are stamped 2 tiles thick for visibility. Towers are 3x3
+    blocks. Gates create wide openings with COBBLESTONE road tiles.
+    """
+    # Tiles that defensive walls must NOT overwrite
+    no_wall_over = (FLOOR, DOOR, WINDOW, WATER)
+    road_tiles = (ROAD, COBBLESTONE, GRAVEL_ROAD, DIRT_TRACK)
 
-    # Stamp tower positions (2x2 wall blocks)
+    # --- 1. Stamp wall lines 2 tiles thick ---
+    # For each wall segment, draw the Bresenham line and also offset
+    # inward/outward by 1 tile perpendicular to the segment.
+    n_wp = len(defense.wall_points)
+    wall_cx = sum(p[0] for p in defense.wall_points) / max(1, n_wp)
+    wall_cy = sum(p[1] for p in defense.wall_points) / max(1, n_wp)
+
+    for i in range(n_wp):
+        j = (i + 1) % n_wp
+        x1, y1 = defense.wall_points[i]
+        x2, y2 = defense.wall_points[j]
+
+        # Compute perpendicular offset pointing outward from center
+        seg_dx = x2 - x1
+        seg_dy = y2 - y1
+        seg_len = math.sqrt(seg_dx * seg_dx + seg_dy * seg_dy)
+        if seg_len < 1:
+            continue
+        # Perpendicular (rotated 90 degrees)
+        perp_x = -seg_dy / seg_len
+        perp_y = seg_dx / seg_len
+        # Ensure perpendicular points outward (away from center)
+        mid_x = (x1 + x2) / 2
+        mid_y = (y1 + y2) / 2
+        to_center_x = wall_cx - mid_x
+        to_center_y = wall_cy - mid_y
+        if perp_x * to_center_x + perp_y * to_center_y > 0:
+            perp_x, perp_y = -perp_x, -perp_y  # flip to point outward
+
+        # Draw the main line and one offset line for 2-tile thickness
+        for offset in [0.0, 1.0]:
+            ox = int(round(perp_x * offset))
+            oy = int(round(perp_y * offset))
+            for wx, wy in _bresenham(x1 + ox, y1 + oy, x2 + ox, y2 + oy):
+                lx = wx - x0
+                ly = wy - y0
+                if 0 <= lx < CHUNK_SIZE and 0 <= ly < CHUNK_SIZE:
+                    if tiles[ly, lx] not in no_wall_over:
+                        tiles[ly, lx] = BUILT_WALL
+
+    # --- 2. Stamp tower positions (3x3 BUILT_WALL blocks) ---
     for tx, ty in defense.tower_positions:
-        for dy in range(-1, 1):
-            for dx in range(-1, 1):
+        for dy in range(-1, 2):
+            for dx in range(-1, 2):
                 lx = (tx + dx) - x0
                 ly = (ty + dy) - y0
                 if 0 <= lx < CHUNK_SIZE and 0 <= ly < CHUNK_SIZE:
-                    if tiles[ly, lx] not in (FLOOR, DOOR, ROAD):
-                        tiles[ly, lx] = WALL
+                    if tiles[ly, lx] not in (FLOOR, DOOR):
+                        tiles[ly, lx] = BUILT_WALL
+
+    # --- 3. Stamp gate openings (5 tiles wide to fit roads) ---
+    # Gates clear wall tiles and place road, ensuring passability.
+    for gx, gy, direction in defense.gate_positions:
+        for offset in range(-2, 3):
+            # Clear in the gate direction (across the wall thickness)
+            for depth in range(-2, 3):
+                if direction in ("north", "south"):
+                    wx, wy = gx + offset, gy + depth
+                else:
+                    wx, wy = gx + depth, gy + offset
+                lx = wx - x0
+                ly = wy - y0
+                if 0 <= lx < CHUNK_SIZE and 0 <= ly < CHUNK_SIZE:
+                    if tiles[ly, lx] == BUILT_WALL:
+                        tiles[ly, lx] = COBBLESTONE
+        # Stamp a gate marker in the center (DOOR tile for visual)
+        for side_off in [-2, 2]:
+            if direction in ("north", "south"):
+                gwx, gwy = gx + side_off, gy
+            else:
+                gwx, gwy = gx, gy + side_off
+            glx = gwx - x0
+            gly = gwy - y0
+            if 0 <= glx < CHUNK_SIZE and 0 <= gly < CHUNK_SIZE:
+                if tiles[gly, glx] in (COBBLESTONE,) + road_tiles:
+                    tiles[gly, glx] = BUILT_WALL  # gate pillars
+
+    # --- 4. Stamp moat as water tiles ---
+    if defense.has_moat and defense.moat_points:
+        n_mp = len(defense.moat_points)
+        for i in range(n_mp):
+            j = (i + 1) % n_mp
+            x1, y1 = defense.moat_points[i]
+            x2, y2 = defense.moat_points[j]
+            for wx, wy in _bresenham(x1, y1, x2, y2):
+                lx = wx - x0
+                ly = wy - y0
+                if 0 <= lx < CHUNK_SIZE and 0 <= ly < CHUNK_SIZE:
+                    current = tiles[ly, lx]
+                    if current in (GRASS, FARMLAND):
+                        tiles[ly, lx] = WATER
 
 
 def _stamp_settlement_farms(tiles, farms, x0, y0):
@@ -1055,7 +1181,7 @@ def _generate_settlement_buildings(sp, plan, rng: random.Random):
     spec = getattr(sp, 'specialization', 'general')
     layout = planner.plan_settlement(
         sp.name, sp.kind, sp.x, sp.y, sp.radius, plan, rng,
-        specialization=spec)
+        specialization=spec, race=getattr(sp, 'race', 'human'))
 
     # Store layout on the settlement plan for road/wall/farm stamping
     sp._layout = layout
@@ -1194,6 +1320,8 @@ def _stamp_roads(chunk: Chunk, plan, x0: int, y0: int):
         "dirt_track": DIRT_TRACK,
     }
 
+    no_road_over = (WALL, BUILT_WALL, FLOOR, DOOR, WATER)
+
     for road in roads:
         road_tile = road_tile_map.get(road.road_type, ROAD)
         road_width = {"king_road": 2, "paved_road": 1,
@@ -1208,7 +1336,7 @@ def _stamp_roads(chunk: Chunk, plan, x0: int, y0: int):
                 lx = wx - x0
                 ly = wy - y0
                 if 0 <= lx < CHUNK_SIZE and 0 <= ly < CHUNK_SIZE:
-                    if tiles[ly, lx] not in (WALL, FLOOR, DOOR, WATER):
+                    if tiles[ly, lx] not in no_road_over:
                         tiles[ly, lx] = road_tile
                     # Road width
                     for d in range(1, rw + 1):
@@ -1216,8 +1344,7 @@ def _stamp_roads(chunk: Chunk, plan, x0: int, y0: int):
                             nlx, nly = lx + dlx, ly + dly
                             if (0 <= nlx < CHUNK_SIZE and
                                     0 <= nly < CHUNK_SIZE):
-                                if tiles[nly, nlx] not in (
-                                        WALL, FLOOR, DOOR, WATER):
+                                if tiles[nly, nlx] not in no_road_over:
                                     tiles[nly, nlx] = road_tile
 
 

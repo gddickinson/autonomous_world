@@ -1291,13 +1291,25 @@ class World:
             return False
         tile = self.tiles[y][x]
         if TERRAIN_WALK_COST.get(tile, 999) >= 10:
+            # Allow walking in shallow water (WATER tiles adjacent to land)
+            if tile == WATER:
+                from game.ui.water_render import is_deep_water
+                return not is_deep_water(self.tiles, x, y,
+                                         self.width, self.height)
             return False
         return True
 
     def get_walk_cost(self, x: int, y: int) -> float:
         if x < 0 or x >= self.width or y < 0 or y >= self.height:
             return 999
-        base_cost = TERRAIN_WALK_COST.get(self.tiles[y][x], 999)
+        tile = self.tiles[y][x]
+        base_cost = TERRAIN_WALK_COST.get(tile, 999)
+
+        # Shallow water (adjacent to land) is wadeable at cost 2.5
+        if tile == WATER and base_cost >= 10:
+            from game.ui.water_render import is_deep_water
+            if not is_deep_water(self.tiles, x, y, self.width, self.height):
+                base_cost = 2.5
 
         # Check rubble depth — accumulated debris slows or blocks movement
         rubble = getattr(self, '_rubble_tracker', None)
@@ -1552,6 +1564,11 @@ class ChunkedWorld:
             return False
         tile = self.tiles[y][x]
         if TERRAIN_WALK_COST.get(tile, 999) >= 10:
+            # Allow walking in shallow water (WATER tiles adjacent to land)
+            if tile == WATER:
+                from game.ui.water_render import is_deep_water
+                return not is_deep_water(self.tiles, x, y,
+                                         self.width, self.height)
             return False
         # Buildings are now freely walkable — player enters through doors
         # on the overworld map without needing to switch to interior mode
@@ -1560,7 +1577,13 @@ class ChunkedWorld:
     def get_walk_cost(self, x: int, y: int) -> float:
         if x < 0 or x >= self.width or y < 0 or y >= self.height:
             return 999
-        base_cost = TERRAIN_WALK_COST.get(self.tiles[y][x], 999)
+        tile = self.tiles[y][x]
+        base_cost = TERRAIN_WALK_COST.get(tile, 999)
+        # Shallow water (adjacent to land) is wadeable at cost 2.5
+        if tile == WATER and base_cost >= 10:
+            from game.ui.water_render import is_deep_water
+            if not is_deep_water(self.tiles, x, y, self.width, self.height):
+                base_cost = 2.5
         if self._rubble_tracker:
             rubble_cost = self._rubble_tracker.get_walk_cost(x, y)
             if rubble_cost > 0:

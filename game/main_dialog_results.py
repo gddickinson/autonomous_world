@@ -57,6 +57,9 @@ class DialogResultsMixin:
                     self.notifications.add(f"New quest: {npc.quest.title}", 4.0, YELLOW)
                     npc.add_memory("quest", "The player accepted a task from me", 3)
                     npc.player_relationship = min(100, npc.player_relationship + 3)
+                    # Multiplayer: broadcast quest accept to co-op partners
+                    if hasattr(self, '_mp_broadcast_quest_accept'):
+                        self._mp_broadcast_quest_accept(npc.quest)
                 else:
                     self.notifications.add("Quest log full! (max 10)", 3.0, RED)
             else:
@@ -73,6 +76,14 @@ class DialogResultsMixin:
                     npc.has_quest_marker = False
                     npc.add_memory("quest", "The player completed my task! Grateful.", 5)
                     npc.player_relationship = min(100, npc.player_relationship + 10)
+                    # Multiplayer: broadcast quest complete
+                    if hasattr(self, '_mp_broadcast_quest_complete'):
+                        self._mp_broadcast_quest_complete(npc.quest)
+                    # Track quest completion for title system
+                    tracker = getattr(self.player, 'title_tracker', None)
+                    if tracker:
+                        settlement = getattr(npc, 'home_settlement', '')
+                        tracker.record_quest_complete(settlement)
             else:
                 self.notifications.add("You haven't completed this task yet.", 3.0, ORANGE)
 

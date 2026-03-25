@@ -13,6 +13,8 @@ DEFAULT_CONFIG = {
     "world_seed": None,         # None = random
     "world_gen_mode": "simulated", # "simulated" (history sim, default) or "planned" (fast)
     "history_years": 500,       # years of history to simulate (if simulated mode)
+    "terrain_style": "volcanic",  # "volcanic" (new rift arms) or "classic" (legacy FBM)
+    "settlement_style": "voronoi",  # "voronoi" (new street layout) or "classic" (legacy zones)
 
     # Gameplay
     "player_mode": "mortal",    # mortal, ghost, god
@@ -85,6 +87,14 @@ CONFIG_OPTIONS = {
     "world_gen_mode": ("World Gen", [
         ("Planned (fast)", "planned"),
         ("Simulated History (slow)", "simulated"),
+    ]),
+    "terrain_style": ("Terrain Style", [
+        ("Volcanic Island (new)", "volcanic"),
+        ("Classic FBM Island (legacy)", "classic"),
+    ]),
+    "settlement_style": ("Settlement Style", [
+        ("Voronoi Streets (new)", "voronoi"),
+        ("Zone-based (legacy)", "classic"),
     ]),
     "history_years": ("History Length", [
         ("100 years", 100),

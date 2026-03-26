@@ -68,8 +68,8 @@ class LTPSettlementPlacer:
         return self._trade_routes
 
     def _build_candidate_grid(self):
-        """Sample candidate locations every ~50 tiles, filtering water/mountains."""
-        step = 50
+        """Sample candidate locations every ~75 tiles, filtering water/mountains."""
+        step = 75
         nodes = []
         elevations = []
 
@@ -111,7 +111,8 @@ class LTPSettlementPlacer:
             self._neighbors = [[] for _ in range(n)]
             return
 
-        max_dist = 150.0
+        max_dist = 200.0  # increased for sparser grid (step=75)
+        max_dist_sq = max_dist * max_dist
         max_neighbors = 8
 
         # Build neighbor lists using a grid-based spatial index
@@ -123,6 +124,7 @@ class LTPSettlementPlacer:
 
         edges = []  # (i, j, cost)
         neighbors = [[] for _ in range(n)]
+        _sqrt = math.sqrt  # local binding for speed
 
         for i in range(n):
             xi, yi = self._node_positions[i]
@@ -139,13 +141,14 @@ class LTPSettlementPlacer:
                             if j <= i:
                                 continue
                             xj, yj = self._node_positions[j]
-                            dist = math.sqrt((xi - xj)**2 + (yi - yj)**2)
-                            if dist <= max_dist:
-                                candidates.append((j, dist))
+                            dsq = (xi - xj)**2 + (yi - yj)**2
+                            if dsq <= max_dist_sq:
+                                candidates.append((j, dsq))
 
             # Keep at most max_neighbors closest
             candidates.sort(key=lambda c: c[1])
-            for j, dist in candidates[:max_neighbors]:
+            for j, dsq in candidates[:max_neighbors]:
+                dist = _sqrt(dsq)
                 ej = self._node_elevations[j]
                 cost = _edge_transport_cost(ei, ej, dist)
                 edge_idx = len(edges)
@@ -157,7 +160,10 @@ class LTPSettlementPlacer:
         self._neighbors = neighbors
 
     def _initialize_populations(self):
-        """Initialize populations with noise; boost near ruins and rivers."""
+        """Initialize populations with noise; boost near ruins and rivers.
+
+        Uses numpy vectorized distance calculations for speed.
+        """
         import numpy as np
 
         n = len(self._node_positions)
@@ -170,21 +176,37 @@ class LTPSettlementPlacer:
         noise = np.array([self.rng.uniform(-0.1, 0.1) for _ in range(n)])
         pops += noise
 
+        # Convert node positions to numpy for vectorized distance calc
+        node_xy = np.array(self._node_positions, dtype=np.float64)  # (n, 2)
+
         # Boost nodes near ruin/special locations (historical seeding)
         for loc in self.wp.special_locations:
             if loc.kind in ("ruins", "temple", "shrine"):
-                for i, (nx, ny) in enumerate(self._node_positions):
-                    dist = math.sqrt((nx - loc.x)**2 + (ny - loc.y)**2)
-                    if dist < 200:
-                        pops[i] += 2.0 * max(0, 1.0 - dist / 200.0)
+                dx = node_xy[:, 0] - loc.x
+                dy = node_xy[:, 1] - loc.y
+                dist = np.sqrt(dx * dx + dy * dy)
+                mask = dist < 200
+                pops[mask] += 2.0 * np.maximum(0, 1.0 - dist[mask] / 200.0)
 
         # Boost nodes near rivers (water access advantage)
+        # Collect all sampled river points, then use spatial bucketing
+        river_pts = []
         for river in self.wp.rivers:
-            for px, py in river.points[::5]:  # sample every 5th point
-                for i, (nx, ny) in enumerate(self._node_positions):
-                    dist = math.sqrt((nx - px)**2 + (ny - py)**2)
-                    if dist < 100:
-                        pops[i] += 0.5 * max(0, 1.0 - dist / 100.0)
+            river_pts.extend(river.points[::10])  # sample every 10th
+        if river_pts:
+            rp = np.array(river_pts, dtype=np.float64)  # (m, 2)
+            # For each node, find min distance to any river point
+            # Process in batches to avoid huge memory allocation
+            batch = 500
+            for start in range(0, len(rp), batch):
+                rp_batch = rp[start:start + batch]  # (b, 2)
+                # Broadcast: (n, 1, 2) - (1, b, 2) -> (n, b, 2)
+                diff = node_xy[:, None, :] - rp_batch[None, :, :]
+                dists = np.sqrt((diff * diff).sum(axis=2))  # (n, b)
+                min_d = dists.min(axis=1)  # (n,)
+                mask = min_d < 100
+                pops[mask] += 0.5 * np.maximum(
+                    0, 1.0 - min_d[mask] / 100.0)
 
         # Normalize
         total = pops.sum()
@@ -193,8 +215,11 @@ class LTPSettlementPlacer:
 
         self._populations = pops
 
-    def _run_ltp_iteration(self, steps: int = 50):
-        """Run LTP transport-connectivity reinforcement (PageRank-like)."""
+    def _run_ltp_iteration(self, steps: int = 20):
+        """Run LTP transport-connectivity reinforcement (PageRank-like).
+
+        Uses vectorized numpy operations on edge arrays for speed.
+        """
         import numpy as np
 
         n = len(self._node_positions)
@@ -212,40 +237,44 @@ class LTPSettlementPlacer:
         d = 0.8
         R = 100.0  # characteristic transport distance
 
+        # Pre-compute edge arrays for vectorized updates
+        edge_i = np.array([e[0] for e in self._edges], dtype=np.int32)
+        edge_j = np.array([e[1] for e in self._edges], dtype=np.int32)
+        edge_cost = np.array([e[2] for e in self._edges], dtype=np.float64)
+        r_ij = edge_cost / R
+        decay = np.where(r_ij < 20, np.exp(-r_ij), 0.0)
+
+        # Pre-build neighbor edge index arrays per node
+        nbr_edges = [[] for _ in range(n)]  # list of (neighbor_idx, edge_idx)
+        for e_idx, (i, j, _) in enumerate(self._edges):
+            nbr_edges[i].append((j, e_idx))
+            nbr_edges[j].append((i, e_idx))
+
+        uniform = 1.0 / n
+        floor_val = 0.001 / n
+
         for step_i in range(steps):
-            # --- Update edge weights ---
-            for e_idx, (i, j, base_cost) in enumerate(self._edges):
-                r_ij = base_cost / R
-                decay = math.exp(-r_ij) if r_ij < 20 else 0.0
-                w[e_idx] += epsilon * (x[i] * x[j] - decay * w[e_idx])
-                if w[e_idx] < 0:
-                    w[e_idx] = 0.0
+            # --- Vectorized edge weight update ---
+            product = x[edge_i] * x[edge_j]
+            w += epsilon * (product - decay * w)
+            np.maximum(w, 0.0, out=w)
 
             # --- Update populations ---
-            new_x = np.zeros(n, dtype=np.float64)
-            for i in range(n):
-                nbrs = self._neighbors[i]
-                if not nbrs:
-                    new_x[i] = x[i]
-                    continue
+            # Accumulate weighted inflow using numpy scatter
+            w_sum = np.zeros(n, dtype=np.float64)
+            inflow = np.zeros(n, dtype=np.float64)
 
-                w_sum = 0.0
-                inflow = 0.0
-                for j, e_idx in nbrs:
-                    we = w[e_idx]
-                    w_sum += we
-                    inflow += we * x[j]
+            # Add contributions from both directions of each edge
+            np.add.at(w_sum, edge_i, w)
+            np.add.at(w_sum, edge_j, w)
+            np.add.at(inflow, edge_i, w * x[edge_j])
+            np.add.at(inflow, edge_j, w * x[edge_i])
 
-                if w_sum > 1e-12:
-                    inflow /= w_sum
-                else:
-                    inflow = x[i]
-
-                uniform = 1.0 / n
-                new_x[i] = x[i] + d * (inflow - x[i]) + (1 - d) * (
-                    uniform - x[i])
-                if new_x[i] < 0.001 / n:
-                    new_x[i] = 0.001 / n
+            # Compute new populations
+            has_nbrs = w_sum > 1e-12
+            inflow_norm = np.where(has_nbrs, inflow / w_sum, x)
+            new_x = x + d * (inflow_norm - x) + (1 - d) * (uniform - x)
+            np.maximum(new_x, floor_val, out=new_x)
 
             # Normalize
             total = new_x.sum()
@@ -274,10 +303,10 @@ class LTPSettlementPlacer:
         sqrt_base = math.sqrt(base)
 
         quotas = {
-            "city":    max(2, int(0.6 * sqrt_base + 1)),
-            "town":    max(4, int(2.0 * sqrt_base + 3)),
-            "village": max(10, int(6.0 * sqrt_base + 5)),
-            "hamlet":  max(25, int(16.0 * sqrt_base + 5)),
+            "city":    max(2, int(0.5 * sqrt_base + 1)),
+            "town":    max(4, int(1.5 * sqrt_base + 2)),
+            "village": max(8, int(4.0 * sqrt_base + 3)),
+            "hamlet":  max(20, int(10.0 * sqrt_base + 5)),
         }
 
         min_dist = {

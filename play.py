@@ -2,7 +2,7 @@
 """Launch Autonomous World game.
 
 Usage:
-    python play.py                # normal game with character creation
+    python play.py                # normal game with startup menu
     python play.py --dev          # dev/cheat character creation screen
     python play.py --cheat        # alias for --dev
     python play.py --skip-chargen # skip character creation (defaults)
@@ -10,7 +10,9 @@ Usage:
     python play.py --multiplayer  # host a multiplayer game
     python play.py --ai-companion warrior  # host + spawn AI co-player
     python play.py --join HOST:PORT        # join an existing game
+    python play.py --no-menu      # skip startup menu (legacy behavior)
 """
+import sys
 import argparse
 from game.main import Game, main
 from game.config import GameConfig
@@ -24,6 +26,8 @@ def _parse_args():
                         help="Skip character creation (use defaults)")
     parser.add_argument("--wizard", action="store_true",
                         help="Start as level 20 Wizard with all spells (cheat)")
+    parser.add_argument("--no-menu", action="store_true",
+                        help="Skip startup menu (legacy behavior)")
     # Multiplayer flags
     parser.add_argument("--multiplayer", action="store_true",
                         help="Enable multiplayer (host server)")
@@ -108,5 +112,31 @@ if __name__ == "__main__":
         config = GameConfig()
         _apply_multiplayer_flags(args, config)
         config.save()
+
+    # Show startup menu unless --no-menu or special modes
+    skip_menu = (args.no_menu or args.wizard or args.join
+                 or args.multiplayer or args.ai_companion)
+
+    if not skip_menu:
+        from game.ui.startup_menu import show_startup_menu
+        result = show_startup_menu()
+        action = result["action"]
+
+        if action == "quit":
+            import sys
+            sys.exit()
+        elif action == "continue":
+            Game._load_world = result["save_path"]
+        elif action == "load":
+            Game._load_world = result["save_path"]
+        elif action == "new":
+            # Reset seed so a fresh world is generated (not the saved one)
+            config = GameConfig()
+            config.set("world_seed", None)
+            config.save()
+            Game._load_world = None  # ensure no save is loaded
+
+        # Skip the old built-in title screen since we already showed the startup menu
+        Game._skip_title = True
 
     main()

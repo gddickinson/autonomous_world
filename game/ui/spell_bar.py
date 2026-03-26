@@ -204,8 +204,9 @@ class SpellBar:
         if not getattr(player, 'is_spellcaster', False):
             return False
 
-        # S toggles spell list
-        if key == pygame.K_s:
+        # Shift+S toggles spell list (plain S is movement)
+        mods = pygame.key.get_mods()
+        if key == pygame.K_s and (mods & pygame.KMOD_SHIFT):
             self.show_full_list = not self.show_full_list
             self.list_scroll = 0
             return True

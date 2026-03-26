@@ -25,6 +25,7 @@ from game.ui.water_render import (
     build_shore_foam_overlays, get_land_neighbor_mask,
 )
 from game.ui.renderer_tiles import build_tile_cache
+from game.ui.sprite_loader import get_sprite_manager
 
 # Pre-computed frozenset for terrain edge blending checks (hot path)
 _NATURAL_BLEND_TYPES = frozenset((
@@ -812,9 +813,13 @@ class Renderer:
                     tile_type = world.tiles[by][bx]
                     if tile_type not in _batch_types:
                         continue
-                    # Use seasonal tile if available, else standard cache
-                    tile_surf = (self._get_seasonal_tile(tile_type)
-                                 or self._tile_cache.get(tile_type))
+                    # Use seasonal tile, or position-based variant, or base cache
+                    tile_surf = self._get_seasonal_tile(tile_type)
+                    if tile_surf is None:
+                        _smgr = get_sprite_manager()
+                        tile_surf = _smgr.get_variant_for_position(tile_type, bx, by)
+                    if tile_surf is None:
+                        tile_surf = self._tile_cache.get(tile_type)
                     if tile_surf:
                         bsx = bx * TILE_SIZE - cam_x_int
                         bsy = by * TILE_SIZE - cam_y_int
@@ -939,8 +944,13 @@ class Renderer:
                             if not tile_surf:
                                 tile_surf = self._water_base_variants.get(wclass)
                         else:
-                            tile_surf = (self._get_seasonal_tile(tile_type)
-                                         or self._tile_cache.get(tile_type))
+                            tile_surf = self._get_seasonal_tile(tile_type)
+                            if tile_surf is None:
+                                _smgr = get_sprite_manager()
+                                tile_surf = _smgr.get_variant_for_position(
+                                    tile_type, x, y)
+                            if tile_surf is None:
+                                tile_surf = self._tile_cache.get(tile_type)
                     except Exception:
                         tile_surf = None
                     if tile_surf:

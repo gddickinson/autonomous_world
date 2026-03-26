@@ -27,11 +27,40 @@ def draw_player_body(screen, player, sx: int, sy: int, s: int, mounted=False):
         _draw_ghost(screen, player, sx, sy, s, anim)
         return
 
-    if mode == "god":
+    # Check for god disguise — overrides appearance
+    disguise = getattr(player, '_disguise', None)
+    if disguise:
+        if disguise.invisible:
+            return  # invisible gods aren't rendered
+        if disguise.form_type == "creature" and disguise.creature_kind:
+            # Draw as creature sprite instead of humanoid
+            from game.ui.creatures.dispatch import draw_creature_body
+            class _FakeCreature:
+                def __init__(self, kind, x, y):
+                    self.kind = kind
+                    self.x = x; self.y = y
+                    self.hp = 100; self.max_hp = 100
+                    self.alive = True; self.state = ''
+            fc = _FakeCreature(disguise.creature_kind, player.x, player.y)
+            draw_creature_body(screen, fc, sx, sy, s)
+            if disguise.glow:
+                _draw_god_aura(screen, sx, sy, s)
+            return
+        # Humanoid disguise — override colors
+        body_color = disguise.clothing_color
+        skin = disguise.body_color
+        # Scale size
+        if disguise.size_scale != 1.0:
+            s = max(1, int(s * disguise.size_scale))
+        if disguise.glow:
+            _draw_god_aura(screen, sx, sy, s)
+    elif mode == "god":
         _draw_god_aura(screen, sx, sy, s)
-
-    body_color = _GOD_BODY if mode == "god" else _MORTAL_BODY
-    skin = _GOD_SKIN if mode == "god" else _MORTAL_SKIN
+        body_color = _GOD_BODY
+        skin = _GOD_SKIN
+    else:
+        body_color = _MORTAL_BODY
+        skin = _MORTAL_SKIN
 
     # Pose-based rendering for non-walking/standing actions
     if not mounted:

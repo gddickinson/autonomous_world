@@ -757,6 +757,14 @@ class SimulationManager(SimCombatMixin, SimNeedsMixin, SimConversationsMixin,
         self._decay_needs(npcs, dt)
         self._check_critical_needs(npcs, dt)
 
+        # Environmental exposure damage (every 30 ticks for performance)
+        if self._sim_tick % 30 == 0 and hasattr(self, 'climate'):
+            from game.systems.exposure import update as exposure_update
+            exposure_update(npcs, self.world_mgr.creatures, player,
+                            self.climate, self.world,
+                            event_log=self.event_log,
+                            time_sys=self.time_sys)
+
         # Threat response (BEFORE decisions - overrides normal behavior)
         self._threat_response(npcs, dt)
 
@@ -1002,7 +1010,10 @@ class SimulationManager(SimCombatMixin, SimNeedsMixin, SimConversationsMixin,
         # Passive trade (daily road-based gold transfer) — once per game day
         if self.time_sys.day != self._trade_last_day:
             self._trade_last_day = self.time_sys.day
-            self.trade.passive_trade(self.world.structures, self.governance)
+            # Early game boost: run passive trade twice in first 5 days
+            _trade_passes = 2 if self.time_sys.day < 5 else 1
+            for _ in range(_trade_passes):
+                self.trade.passive_trade(self.world.structures, self.governance)
             for msg in self.trade.get_trade_log():
                 self.event_log.append(msg)
 
@@ -1109,8 +1120,11 @@ class SimulationManager(SimCombatMixin, SimNeedsMixin, SimConversationsMixin,
         if self.time_sys.day != self._construction_last_day:
             self._construction_last_day = self.time_sys.day
             self.construction.advance_building_projects(self.world.structures)
-            self.construction.auto_commission_buildings(
-                self.governance, self.world.structures)
+            # Early game boost: try commissioning multiple times in first 5 days
+            _commission_passes = 3 if self.time_sys.day < 5 else 1
+            for _ in range(_commission_passes):
+                self.construction.auto_commission_buildings(
+                    self.governance, self.world.structures)
             # Road construction between growing settlements
             _wp = getattr(self.world, 'plan', None)
             self.construction.check_road_construction(

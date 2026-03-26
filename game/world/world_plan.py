@@ -164,7 +164,7 @@ class WorldPlan:
         self._history_diplomatic_relations: dict = {}
         self._history_trade_routes: list = []
 
-    def generate(self, progress_callback=None):
+    def generate(self, progress_callback=None, skip_layouts=False):
         """Generate the complete world plan.
 
         This is the ONE-TIME upfront generation that decides where
@@ -175,11 +175,16 @@ class WorldPlan:
         progress_callback : callable, optional
             Called as progress_callback(message, fraction) to report progress.
             Useful for loading screen display.
+        skip_layouts : bool
+            If True, skip settlement layouts AND all non-terrain steps
+            (rivers, LTP, kingdoms, NPC roster). Used when loading a saved
+            world — only the elevation cache and spine are needed for chunk
+            terrain generation. Everything else is deterministic from the
+            seed and will match the saved state.
         """
         rng = random.Random(self.seed)
 
-        # Pre-compute a low-res elevation grid for fast settlement placement.
-        # Resolution: 1 sample per 10 tiles = 1000x1000 for a 10,000 world.
+        # Pre-compute a low-res elevation grid — always needed for chunk gen
         self._build_elevation_cache()
 
         # New volcanic terrain: generate mountain spine, fill sinks, compute rivers
@@ -210,47 +215,52 @@ class WorldPlan:
             self._elev_cache = add_mini_island_elevation(
                 xx, yy, self._elev_cache, self._mini_islands)
             self._filled_elevation = fill_sinks(self._elev_cache)
-            flow_rivers = compute_rivers(
-                self._filled_elevation, sea_level=0.22,
-                cache_step=self._elev_step)
-            # Convert to RiverPlan objects with flow/rank metadata
-            for rd in flow_rivers:
-                self.rivers.append(RiverPlan(
-                    points=[(int(px), int(py)) for px, py in rd["points"]],
-                    flow=rd.get("flow", 0),
-                    rank=rd.get("rank", "stream")))
-            # Compute lakes in flat high-flow areas
-            fdir = compute_flow_dir(self._filled_elevation)
-            facc = compute_flow_accum(
-                self._filled_elevation, 0.22, fdir)
-            raw_lakes = compute_lakes(
-                self._filled_elevation, facc, fdir,
-                sea_level=0.22, cache_step=self._elev_step)
-            for lk in raw_lakes:
-                self.lakes.append(LakePlan(
-                    center=lk["center"],
-                    cells=lk["cells"],
-                    radius=lk["radius"]))
+
+            # Rivers, lakes, settlements, kingdoms — skip when loading saved world
+            if not skip_layouts:
+                flow_rivers = compute_rivers(
+                    self._filled_elevation, sea_level=0.22,
+                    cache_step=self._elev_step)
+                for rd in flow_rivers:
+                    self.rivers.append(RiverPlan(
+                        points=[(int(px), int(py)) for px, py in rd["points"]],
+                        flow=rd.get("flow", 0),
+                        rank=rd.get("rank", "stream")))
+                fdir = compute_flow_dir(self._filled_elevation)
+                facc = compute_flow_accum(
+                    self._filled_elevation, 0.22, fdir)
+                raw_lakes = compute_lakes(
+                    self._filled_elevation, facc, fdir,
+                    sea_level=0.22, cache_step=self._elev_step)
+                for lk in raw_lakes:
+                    self.lakes.append(LakePlan(
+                        center=lk["center"],
+                        cells=lk["cells"],
+                        radius=lk["radius"]))
+
+        # Everything below is metadata (settlements, roads, kingdoms, NPCs)
+        # — deterministic from seed, so skip when loading a saved world
+        if skip_layouts:
+            # Set spawn point to center (will be overridden by save data)
+            self.spawn_point = (self.width // 2, self.height // 2)
+            self._build_npc_roster(rng)
+            return
 
         self._plan_regions(rng)
         if not USE_NEW_TERRAIN:
             self._plan_rivers(rng)
 
         if self.use_history_sim:
-            # Use the history simulation for settlements, roads, kingdoms
             self._plan_settlements_simulated(rng, years=500,
                                              progress_callback=progress_callback)
         elif self.use_ltp_settlements:
-            # Use terrain-driven LTP model for emergent settlement placement
             self._plan_settlements_ltp(rng)
         else:
             self._plan_settlements(rng)
             self._plan_roads(rng)
 
-        # Nudge any settlements whose centres are too close to water
         self._nudge_settlements_from_water()
 
-        # Add mini-island settlements (fishing hamlets/villages)
         if USE_NEW_TERRAIN and hasattr(self, '_mini_islands'):
             island_settles = plan_mini_island_settlements(
                 self._mini_islands, self.seed)
@@ -269,21 +279,15 @@ class WorldPlan:
         self._plan_test_island()
         self._plan_spawn_temple()
 
-        # Pre-generate all settlement building layouts during loading
-        # (avoids expensive Voronoi/zone computation during chunk loading)
         self._pregenerate_settlement_layouts(rng, progress_callback)
 
         if not self.use_history_sim:
-            # History sim already sets up kingdoms
             self._plan_kingdoms(rng)
 
         self._plan_foreign_contacts()
-
-        # Post-planning specialization passes
         self._assign_capital_specializations()
         self._assign_trade_connections()
 
-        # Re-evaluate crossroads now that roads exist
         for sp in self.settlements:
             if sp.specialization == "general":
                 road_count = 0
@@ -749,17 +753,41 @@ class WorldPlan:
 
         This runs during the loading screen so that chunk generation
         never needs to compute layouts (which can be slow for Voronoi).
+        Uses ProcessPoolExecutor to parallelize across CPU cores.
         """
+        from concurrent.futures import ProcessPoolExecutor, as_completed
         from game.world.chunk_generator import _generate_settlement_buildings
-        total = len(self.settlements)
-        for i, sp in enumerate(self.settlements):
-            if not sp.buildings:
-                s_rng = random.Random(self.seed ^ hash(sp.name))
-                _generate_settlement_buildings(sp, self, s_rng)
-            if progress_callback and i % 10 == 0:
-                progress_callback(
-                    f"Building settlements... ({i+1}/{total})",
-                    0.5 + 0.4 * i / max(1, total))
+
+        to_generate = [sp for sp in self.settlements if not sp.buildings]
+        total = len(to_generate)
+        if total == 0:
+            return
+
+        # Generate layouts in parallel using multiple processes
+        # Each worker gets a serializable subset of the data it needs
+        def _generate_one(sp):
+            s_rng = random.Random(self.seed ^ hash(sp.name))
+            _generate_settlement_buildings(sp, self, s_rng)
+            return sp
+
+        # Use threads (ProcessPool won't work easily with shared state).
+        # The GIL is released during numpy/scipy calls in Voronoi, so
+        # ThreadPoolExecutor still provides meaningful speedup.
+        from concurrent.futures import ThreadPoolExecutor
+        import os
+        workers = min(os.cpu_count() or 4, 4)
+
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {executor.submit(_generate_one, sp): i
+                       for i, sp in enumerate(to_generate)}
+            done_count = 0
+            for future in as_completed(futures):
+                future.result()  # propagate exceptions
+                done_count += 1
+                if progress_callback and done_count % 10 == 0:
+                    progress_callback(
+                        f"Building settlements... ({done_count}/{total})",
+                        0.5 + 0.4 * done_count / max(1, total))
 
     # ------------------------------------------------------------------
     # Settlement planning (LTP model)

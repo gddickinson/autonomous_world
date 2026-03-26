@@ -41,7 +41,10 @@ def compute_flow_dir(elev):
 
 
 def compute_flow_accum(elevation_grid, sea_level, flow_dir):
-    """Compute flow accumulation over land cells, high-to-low."""
+    """Compute flow accumulation over land cells, high-to-low.
+
+    Uses pre-computed destination arrays to minimize per-cell overhead.
+    """
     h, w = elevation_grid.shape
     land_mask = elevation_grid > sea_level
     accum = np.ones((h, w), dtype=np.int32)
@@ -49,15 +52,23 @@ def compute_flow_accum(elevation_grid, sea_level, flow_dir):
     order = np.argsort(-elevation_grid[lr, lc])
     lr, lc = lr[order], lc[order]
 
+    # Pre-compute D8 offset arrays for vectorized neighbor lookup
+    d8_dr = np.array([d[0] for d in _D8_NBRS], dtype=np.int32)
+    d8_dc = np.array([d[1] for d in _D8_NBRS], dtype=np.int32)
+
+    # Flatten for faster indexing
+    accum_flat = accum.ravel()
+    fd_flat = flow_dir.ravel()
+
     for i in range(len(lr)):
         r, c = int(lr[i]), int(lc[i])
-        d = flow_dir[r, c]
+        d = fd_flat[r * w + c]
         if d < 0:
             continue
-        dr, dc = _D8_NBRS[d]
-        nr, nc = r + dr, c + dc
+        nr = r + d8_dr[d]
+        nc = c + d8_dc[d]
         if 0 <= nr < h and 0 <= nc < w:
-            accum[nr, nc] += accum[r, c]
+            accum_flat[nr * w + nc] += accum_flat[r * w + c]
     return accum
 
 
@@ -99,7 +110,7 @@ def _trace_downstream(r, c, flow_dir, elevation_grid, accum,
 
 
 def compute_rivers(elevation_grid, sea_level=0.22,
-                   accum_threshold=50, cache_step=10):
+                   accum_threshold=100, cache_step=10):
     """Compute realistic river network with tributaries merging into trunks.
 
     Strategy:
@@ -130,7 +141,7 @@ def compute_rivers(elevation_grid, sea_level=0.22,
     src_r, src_c = src_r[order], src_c[order]
 
     # Cap candidate sources for very large grids
-    max_sources = 2000
+    max_sources = 400
     if len(src_r) > max_sources:
         src_r, src_c = src_r[:max_sources], src_c[:max_sources]
 
@@ -180,9 +191,11 @@ def compute_rivers(elevation_grid, sea_level=0.22,
             "joined": joined,
         })
 
-    # Filter very short streams unless they merge into another river
+    # Filter very short streams and low-flow streams at startup
+    # (small streams can be added lazily during chunk generation)
     rivers = [rv for rv in rivers
-              if len(rv["points"]) >= 8 or rv["joined"] >= 0]
+              if (len(rv["points"]) >= 8 or rv["joined"] >= 0)
+              and rv["flow"] >= 30]
 
     # Sort: major first, then medium, then streams
     rank_order = {"major": 0, "medium": 1, "stream": 2}

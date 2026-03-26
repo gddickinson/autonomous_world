@@ -139,6 +139,10 @@ TUNDRA = 76         # frozen grassland (walkable, cold)
 JUNGLE = 77         # dense tropical vegetation (slow, wet)
 DUNE = 78           # sand dune (walkable, desert)
 OASIS_WATER = 79    # oasis pool in desert (water source)
+CLOUD = 80          # divine realm cloud (not walkable)
+MARBLE_FLOOR = 81   # divine realm marble floor
+DIVINE_WATER = 82   # viewing pool shimmering water
+GOLDEN_PATH = 83    # divine realm golden road
 
 # Terrain generation method
 USE_NEW_TERRAIN = True       # Volcanic island with ridges and rivers; False = legacy FBM
@@ -232,6 +236,10 @@ TERRAIN_COLORS = {
     JUNGLE:       (20, 70, 15),
     DUNE:         (220, 200, 140),
     OASIS_WATER:  (50, 160, 180),
+    CLOUD:        (240, 240, 250),
+    MARBLE_FLOOR: (230, 225, 215),
+    DIVINE_WATER: (100, 180, 230),
+    GOLDEN_PATH:  (220, 200, 120),
 }
 
 TERRAIN_WALK_COST = {
@@ -315,6 +323,10 @@ TERRAIN_WALK_COST = {
     JUNGLE: 2.5,         # dense tropical undergrowth
     DUNE: 1.8,           # soft sand dunes, slow
     OASIS_WATER: 999,    # oasis pool, not walkable
+    CLOUD: 999,          # divine clouds, not walkable
+    MARBLE_FLOOR: 0.4,   # divine marble, fast
+    DIVINE_WATER: 999,   # viewing pool, not walkable
+    GOLDEN_PATH: 0.3,    # divine golden road, fastest
 }
 
 # Colors

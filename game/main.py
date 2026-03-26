@@ -50,6 +50,7 @@ from game.core.remote_player import RemotePlayer
 from game.systems.difficulty import init_difficulty
 from game.ui.quest_tracker import QuestTracker
 from game.ui.controls_overlay import ControlsOverlay
+from game.ui.help_screen import HelpScreen
 from game.ui.llm_console import LLMConsole
 from game.systems.player_roads import PlayerRoadBuilder
 from game.ui.water_render import WaterRipples
@@ -72,13 +73,50 @@ class Game(DialogResultsMixin, MultiplayerMixin):
 
         # Configuration system
         self.config = GameConfig()
+        self._start_time = time.time()  # playtime tracking
 
-        # Menu system — show title screen
-        self.menus = MenuSystem(self.screen, self.clock, self.config)
-        title_result = self.menus.show_title()
-        if title_result is None:
-            pygame.quit()
-            sys.exit()
+        # Check if we were launched with a world to load (from startup menu)
+        load_world_path = getattr(self.__class__, '_load_world', None)
+        self.__class__._load_world = None  # consume it
+        self._pending_world_save = None  # will hold save data if loading
+
+        if load_world_path:
+            from game.data.world_save import load_world_state
+            save_data = load_world_state(load_world_path)
+            if save_data:
+                self._pending_world_save = save_data
+                # Override config from saved world plan
+                wp = save_data.get("world_plan", {})
+                if wp.get("width"):
+                    self.config["world_width"] = wp["width"]
+                if wp.get("height"):
+                    self.config["world_height"] = wp["height"]
+                if wp.get("seed") is not None:
+                    self.config["world_seed"] = wp["seed"]
+                if wp.get("terrain_style"):
+                    self.config["terrain_style"] = wp["terrain_style"]
+                if wp.get("settlement_style"):
+                    self.config["settlement_style"] = wp["settlement_style"]
+                if wp.get("world_gen_mode"):
+                    self.config["world_gen_mode"] = wp["world_gen_mode"]
+                if wp.get("history_years"):
+                    self.config["history_years"] = wp["history_years"]
+
+        # Menu system — show title screen (skip if startup menu was already shown or loading)
+        _skip_title = getattr(self.__class__, '_skip_title', False)
+        self.__class__._skip_title = False
+        if not self._pending_world_save and not _skip_title:
+            try:
+                self.menus = MenuSystem(self.screen, self.clock, self.config)
+                title_result = self.menus.show_title()
+            except Exception:
+                title_result = "new_game"
+            if title_result is None:
+                pygame.quit()
+                sys.exit()
+        else:
+            title_result = "continue"
+            self.menus = MenuSystem(self.screen, self.clock, self.config)
 
         # Read settings from config (set by menus or loaded from file)
         self.player_mode = self.config["player_mode"]
@@ -91,6 +129,9 @@ class Game(DialogResultsMixin, MultiplayerMixin):
         self._god_choice = None
         skip_chargen = getattr(self.__class__, '_skip_chargen', False)
         dev_chargen = getattr(self.__class__, '_dev_chargen', False)
+        # Skip character creation when loading a saved world
+        if self._pending_world_save:
+            skip_chargen = True
         if self.player_mode == "god" and not skip_chargen:
             from game.ui.god_selection import show_god_selection
             god_result = show_god_selection(self.screen, self.clock)
@@ -113,7 +154,10 @@ class Game(DialogResultsMixin, MultiplayerMixin):
             if dev_chargen and result.get("spawn_location"):
                 self.spawn_location = result["spawn_location"]
 
-        self._show_loading("Generating world...", 0.0)
+        if self._pending_world_save:
+            self._show_loading("Loading saved world...", 0.0)
+        else:
+            self._show_loading("Generating world...", 0.0)
 
         # Core systems — chunked world (uses config dimensions)
         world_w = self.config["world_width"]
@@ -130,8 +174,10 @@ class Game(DialogResultsMixin, MultiplayerMixin):
 
         def _on_progress(text, frac):
             self._show_loading(text, frac)
+        _skip_layouts = bool(self._pending_world_save)
         self.world = ChunkedWorld(world_w, world_h, seed=seed,
-                                  progress_callback=_on_progress)
+                                  progress_callback=_on_progress,
+                                  skip_layouts=_skip_layouts)
         self._show_loading("Generating world...", 0.25)
 
         self.camera = Camera(self.world.width, self.world.height, TILE_SIZE)
@@ -156,6 +202,7 @@ class Game(DialogResultsMixin, MultiplayerMixin):
         init_difficulty(self.config)
         self.quest_tracker = QuestTracker()
         self.controls_overlay = ControlsOverlay()
+        self.help_screen = HelpScreen()
         self.llm_console = LLMConsole()
         self.road_builder = PlayerRoadBuilder()
         self.water_ripples = WaterRipples()
@@ -305,7 +352,15 @@ class Game(DialogResultsMixin, MultiplayerMixin):
             self.player.mana = 999
 
         # Restore saved player state if a save file exists for this seed
-        if title_result == "continue":
+        if self._pending_world_save:
+            # Full world-level restore (from startup menu load)
+            try:
+                from game.data.world_save import apply_loaded_state
+                apply_loaded_state(self, self._pending_world_save)
+            except Exception:
+                pass
+            self._pending_world_save = None
+        elif title_result == "continue":
             try:
                 from game.data.save_game import load_game, apply_save_to_player
                 save_data = load_game("data/savegame.json")
@@ -353,8 +408,13 @@ class Game(DialogResultsMixin, MultiplayerMixin):
             # Divine dashboard and intervention commands
             from game.ui.god_dashboard import GodDashboard
             from game.systems.divine_commands import DivineCommands
+            from game.systems.divine_realm_manager import DivineRealmManager
             self.god_dashboard = GodDashboard(self)
             self.divine_commands = DivineCommands()
+            self.divine_realm = DivineRealmManager(self)
+            self.divine_realm.initialize()
+            from game.systems.god_disguise import GodDisguiseManager
+            self.god_disguise = GodDisguiseManager(self.player)
 
         self.camera.x = self.player.x * TILE_SIZE - SCREEN_WIDTH // 2
         self.camera.y = self.player.y * TILE_SIZE - SCREEN_HEIGHT // 2
@@ -1287,6 +1347,10 @@ class Game(DialogResultsMixin, MultiplayerMixin):
         if self.controls_overlay.handle_event(_co_evt):
             return
 
+        # Context-aware help screen (Shift+H)
+        if self.help_screen.handle_event(_co_evt):
+            return
+
         # 3D camera controls (arrow keys, +/-, [/])
         if self.view_mode == "3d" and hasattr(self, 'renderer_3d') and self.renderer_3d:
             cam_keys = {
@@ -1307,6 +1371,22 @@ class Game(DialogResultsMixin, MultiplayerMixin):
         # Divine commands & dashboard (god mode): intercept before other handlers
         if hasattr(self, 'divine_commands') and getattr(self.player, 'god', False):
             dc = self.divine_commands
+            # Divine Realm: HOME = return to Mt Olympus, V = viewing pool
+            dr = getattr(self, 'divine_realm', None)
+            if dr:
+                if key in (pygame.K_HOME, pygame.K_F5):
+                    if dr.in_divine_realm:
+                        # Already in realm — exit to mortal world
+                        dr.exit_to_mortal_world()
+                    else:
+                        dr.enter_divine_realm()
+                    return
+                if key == pygame.K_v and dr.in_divine_realm:
+                    dr.toggle_viewing_pool()
+                    if dr.viewing_pool_active:
+                        # Open world map as viewing pool
+                        self.ui.show_world_map = True
+                    return
             # Dashboard toggle (TAB)
             if key == pygame.K_TAB:
                 self.god_dashboard.toggle()
@@ -1316,7 +1396,7 @@ class Game(DialogResultsMixin, MultiplayerMixin):
                 if self.god_dashboard.handle_key(key):
                     return
             # Divine command menus and keys (G, K, N, [, ], P, .)
-            if dc.menu.active_menu:
+            if dc.active_menu:
                 if dc.handle_key(key, mods, self):
                     return
             elif key in (pygame.K_LEFTBRACKET, pygame.K_RIGHTBRACKET,
@@ -1330,40 +1410,62 @@ class Game(DialogResultsMixin, MultiplayerMixin):
                           and getattr(self.player, 'god', False)
                           and self.god_ui.panel_visible)
 
+        # Divine commands FIRST in god mode — before god_ui and action_map
+        # G = divine events (only in god mode, drop_item remapped to Shift+G for gods)
+        # K = kingdom commands (god only)
+        # F5 / HOME = divine realm toggle
+        # [ ] = time speed, P = pause (god only, overrides auto-play)
+        if hasattr(self, 'divine_commands') and getattr(self.player, 'god', False):
+            dc = self.divine_commands
+            # G without shift = divine events in god mode (always consumed)
+            if key == pygame.K_g and not (mods & pygame.KMOD_SHIFT):
+                dc.handle_key(key, mods, self)
+                return  # G is always divine events in god mode, never drop_item
+            # K = kingdom commands (always consumed in god mode)
+            elif key == pygame.K_k and not (mods & pygame.KMOD_SHIFT):
+                dc.handle_key(key, mods, self)
+                return
+            # N with shift = spawn menu (always consumed)
+            elif key == pygame.K_n and (mods & pygame.KMOD_SHIFT):
+                dc.handle_key(key, mods, self)
+                return
+            # D = disguise/shapeshift menu
+            elif key == pygame.K_d:
+                self._show_disguise_menu()
+                return
+            # P = pause/time control in god mode (always consumed)
+            elif key == pygame.K_p:
+                dc.handle_key(key, mods, self)
+                return
+            # [ ] = time speed (always consumed in god mode)
+            elif key in (pygame.K_LEFTBRACKET, pygame.K_RIGHTBRACKET, pygame.K_PERIOD):
+                dc.handle_key(key, mods, self)
+                return
+
+        # God UI panel and spell bar
         if god_panel_open:
-            # God panel is open — god UI handles keys first
             if self.god_ui.handle_key(key, unicode_char, mods):
                 return
             if self.spell_bar.handle_key(key, self):
                 return
         else:
-            # God panel closed — spell bar handles keys first
             if self.spell_bar.handle_key(key, self):
                 return
             if hasattr(self, 'god_ui') and getattr(self.player, 'god', False):
                 if self.god_ui.handle_key(key, unicode_char, mods):
                     return
 
-        # Shift+J: Road building mode (before highlight so J alone = highlight)
+        # Shift+J: Road building mode
         if key == pygame.K_j and (mods & pygame.KMOD_SHIFT):
             self.road_builder.toggle(self)
             return
-
-        # Object highlighting (J/K keys)
+        # Object highlighting
         if hasattr(self, 'highlight') and self.highlight.handle_key(key):
             return
-
-        # Shift+R: Relationship panel (before action_map so R alone = recruit)
+        # Shift+R: Relationship panel
         if key == pygame.K_r and (mods & pygame.KMOD_SHIFT):
             self.relationship_panel.toggle()
             return
-
-        # Divine commands intercept G, K, N, P in god mode before action_map
-        if hasattr(self, 'divine_commands') and getattr(self.player, 'god', False):
-            dc = self.divine_commands
-            if key in (pygame.K_g, pygame.K_k, pygame.K_n, pygame.K_p):
-                if dc.handle_key(key, mods, self):
-                    return
 
         # Game controls
         action_map = {
@@ -1380,6 +1482,7 @@ class Game(DialogResultsMixin, MultiplayerMixin):
             pygame.K_F2: lambda: actions.use_ability(self, "whirlwind"),
             pygame.K_F3: lambda: actions.use_ability(self, "keen_eye"),
             pygame.K_F4: lambda: actions.use_ability(self, "charm"),
+            # F5 handled above for divine realm in god mode; scout for mortals
             pygame.K_F5: lambda: actions.use_ability(self, "scout"),
             pygame.K_p: lambda: self._toggle_auto_play(),
             pygame.K_v: lambda: self._toggle_view_mode(),
@@ -1607,6 +1710,8 @@ class Game(DialogResultsMixin, MultiplayerMixin):
             self.view_mode = "adventure"
             self.active_renderer = self.renderer_adventure
             self.camera.set_tile_size(32)
+            # Force FOV recomputation on next frame so tiles draw immediately
+            self._last_fov_pos = None
             self.notifications.add("Adventure View (32px) — V to switch", 3.0, (100, 200, 255))
 
         elif self.view_mode == "adventure":
@@ -1838,6 +1943,12 @@ class Game(DialogResultsMixin, MultiplayerMixin):
             save_game(self.world, self.player, "data/savegame.json")
         except Exception:
             pass
+        # World-level save (full state including kingdoms, time, etc.)
+        try:
+            from game.data.world_save import save_world_state
+            save_world_state(self)
+        except Exception:
+            pass
 
     def _load_game(self):
         """Load saved player state."""
@@ -1858,6 +1969,28 @@ class Game(DialogResultsMixin, MultiplayerMixin):
             self.notifications.add("AUTO-PLAY ON - Player acts autonomously (P to disable)", 4.0, YELLOW)
         else:
             self.notifications.add("AUTO-PLAY OFF - You have control", 3.0, GREEN)
+
+    def _show_disguise_menu(self):
+        """Show the god disguise selection menu."""
+        gd = getattr(self, 'god_disguise', None)
+        if not gd:
+            return
+        templates = gd.get_template_names()
+        # Simple notification-based menu — cycle through options
+        if not hasattr(self, '_disguise_idx'):
+            self._disguise_idx = 0
+        self._disguise_idx = (self._disguise_idx + 1) % (len(templates) + 1)
+        if self._disguise_idx == 0:
+            gd.remove_disguise()
+            self.notifications.add(
+                "Disguise removed — true god form", 3.0, (255, 230, 100))
+        else:
+            name = templates[self._disguise_idx - 1]
+            gd.set_disguise(name)
+            d = gd.current_disguise
+            label = f"{d.name} ({d.race} {d.char_class})" if d.name else name
+            self.notifications.add(
+                f"Shapeshifted into: {label}", 3.0, (180, 220, 255))
 
     def _toggle_sound_mute(self):
         enabled = self.sound.toggle_sounds()
@@ -2751,10 +2884,13 @@ class Game(DialogResultsMixin, MultiplayerMixin):
                              or self.skill_tree_ui.active
                              or self.llm_console.visible)
             if not _panels_block:
+                _is_god = getattr(self.player, 'god', False)
                 if keys[pygame.K_w] or keys[pygame.K_UP]:    self.player.vy = -1
                 if keys[pygame.K_s] or keys[pygame.K_DOWN]:  self.player.vy = 1
                 if keys[pygame.K_a] or keys[pygame.K_LEFT]:  self.player.vx = -1
-                if keys[pygame.K_d] or keys[pygame.K_RIGHT]: self.player.vx = 1
+                # D = move right for mortals, but NOT in god mode (D = disguise)
+                if keys[pygame.K_RIGHT] or (keys[pygame.K_d] and not _is_god):
+                    self.player.vx = 1
 
                 # Speed controls: Shift=run, Ctrl=sneak, default=walk
                 if keys[pygame.K_LSHIFT] or keys[pygame.K_RSHIFT]:
@@ -2800,7 +2936,37 @@ class Game(DialogResultsMixin, MultiplayerMixin):
                 # Only update cooldowns/energy/regen, not velocity-based movement.
                 self.player.vx = 0
                 self.player.vy = 0
-            self.player.update(dt, self.world)
+            # Divine realm movement — use realm tiles for walkability
+            _dr = getattr(self, 'divine_realm', None)
+            if _dr and _dr.in_divine_realm and _dr.realm_data:
+                # Simple divine realm movement (no chunk system)
+                from game.settings import TILE_SIZE as _TS
+                p = self.player
+                if p.vx != 0 or p.vy != 0:
+                    mag = math.sqrt(p.vx**2 + p.vy**2)
+                    if mag > 0:
+                        nx, ny = p.vx / mag, p.vy / mag
+                        p.facing = (nx, ny)
+                        speed = 4.0 * dt  # god speed
+                        new_x = p.x + nx * speed
+                        new_y = p.y + ny * speed
+                        rtiles = _dr.realm_data["tiles"]
+                        rsz = _dr.realm_data["size"]
+                        # Check walkability in divine realm
+                        from game.settings import CLOUD, DIVINE_WATER
+                        ix, iy = int(new_x), int(p.y)
+                        if 0 <= ix < rsz and 0 <= iy < rsz:
+                            if rtiles[iy][ix] not in (CLOUD, DIVINE_WATER):
+                                p.x = new_x
+                        ix, iy = int(p.x), int(new_y)
+                        if 0 <= ix < rsz and 0 <= iy < rsz:
+                            if rtiles[iy][ix] not in (CLOUD, DIVINE_WATER):
+                                p.y = new_y
+                # Center camera
+                self.camera.x = p.x * _TS - SCREEN_WIDTH // 2
+                self.camera.y = p.y * _TS - SCREEN_HEIGHT // 2
+            else:
+                self.player.update(dt, self.world)
             self.crafting_ui.update(dt, self.player)
             self.skill_tree_ui.update(dt)
 
@@ -2812,9 +2978,15 @@ class Game(DialogResultsMixin, MultiplayerMixin):
                         self.player._underground_explored.add((px + dx, py + dy))
 
         # Audio: ambient sounds (footsteps removed)
-        _px_tile = int(self.player.x)
-        _py_tile = int(self.player.y)
-        _cur_tile = self.world.tiles[_py_tile][_px_tile]
+        _dr_audio = getattr(self, 'divine_realm', None)
+        if _dr_audio and _dr_audio.in_divine_realm:
+            _px_tile = int(self.player.x)
+            _py_tile = int(self.player.y)
+            _cur_tile = 81  # MARBLE_FLOOR for ambient
+        else:
+            _px_tile = int(self.player.x)
+            _py_tile = int(self.player.y)
+            _cur_tile = self.world.tiles[_py_tile][_px_tile]
         _tnorm = getattr(self.time_sys, 'normalized',
                          self.time_sys.time / DAY_LENGTH)
         self.sound.update_ambient(
@@ -3271,6 +3443,20 @@ class Game(DialogResultsMixin, MultiplayerMixin):
                     fade.set_alpha(alpha)
                     self.screen.blit(fade, (0, 0))
         else:
+            # Check if we're in the Divine Realm
+            _dr = getattr(self, 'divine_realm', None)
+            if _dr and _dr.in_divine_realm and _dr.realm_data:
+                # Render the divine realm instead of the mortal world
+                if not hasattr(self, '_divine_renderer'):
+                    from game.ui.renderer_divine import DivineRealmRenderer
+                    self._divine_renderer = DivineRealmRenderer(self.screen)
+                self._divine_renderer.draw(
+                    _dr.realm_data, self.camera, self.player, _dr)
+                # Skip the rest of the normal world rendering
+                # but still draw HUD elements below
+                pygame.display.flip()
+                return
+
             # OVERWORLD VIEW — use active renderer
             r = self.active_renderer
             dt = self.clock.get_time() / 1000.0
@@ -3536,6 +3722,9 @@ class Game(DialogResultsMixin, MultiplayerMixin):
 
             # Controls overlay (on top of everything)
             self.controls_overlay.draw(self.screen)
+
+            # Context-aware help screen (on top of everything)
+            self.help_screen.draw(self.screen, self)
 
             # LLM console (on top of all game UI)
             self.llm_console.draw(self.screen)

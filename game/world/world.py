@@ -1442,14 +1442,18 @@ class ChunkedWorld:
 
     def __init__(self, width: int = None, height: int = None,
                  seed: int = None, progress_callback=None,
-                 use_history_sim: bool = None):
+                 use_history_sim: bool = None,
+                 skip_layouts: bool = False):
         """Initialize chunked world.
 
         Args:
             progress_callback: optional callable(text, fraction) for loading UI
             use_history_sim: if True, use history simulation for world gen.
                 If None, reads from GameConfig.
+            skip_layouts: if True, skip expensive settlement layout pregeneration
+                (used when loading a saved world that already has building data).
         """
+        self._skip_layouts = skip_layouts
         from game.settings import WORLD_WIDTH_NEW, WORLD_HEIGHT_NEW
         from game.world.world_plan import WorldPlan
         from game.world.chunk import ChunkGrid
@@ -1477,7 +1481,8 @@ class ChunkedWorld:
             _progress("Planning world...", 0.02)
         self.plan = WorldPlan(self.width, self.height, self.seed,
                               use_history_sim=use_history_sim)
-        self.plan.generate(progress_callback=_progress if use_history_sim else None)
+        self.plan.generate(progress_callback=_progress if use_history_sim else None,
+                           skip_layouts=self._skip_layouts)
         _progress("World plan complete", 0.18)
 
         # Tile storage — ChunkGrid provides world.tiles[y][x] interface

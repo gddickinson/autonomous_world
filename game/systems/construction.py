@@ -214,11 +214,11 @@ class ConstructionSystem:
     def auto_commission(self, governance, world, structures):
         """Kingdoms automatically commission useful projects."""
         for kingdom_name, kingdom in governance.kingdoms.items():
-            if kingdom.treasury < 50:
+            if kingdom.treasury < 30:
                 continue
 
             # Road building between owned settlements
-            if random.random() < 0.02 and len(kingdom.settlements) >= 2:
+            if random.random() < 0.05 and len(kingdom.settlements) >= 2:
                 # Find two settlements that need a road
                 for s in structures:
                     if s.name in kingdom.settlements:
@@ -267,7 +267,7 @@ class ConstructionSystem:
         building_now = {p.settlement_name for p in self.building_projects}
 
         for kingdom_name, kingdom in kingdoms.items():
-            if kingdom.treasury < 50:
+            if kingdom.treasury < 30:
                 continue
 
             for sname in kingdom.settlements:
@@ -291,7 +291,7 @@ class ConstructionSystem:
                         continue
                     # Population proxy: more buildings = more pop assumed
                     # Small settlements get small buildings first
-                    if num_buildings < info["min_pop"] // 3:
+                    if num_buildings < info["min_pop"] // 4:
                         continue
                     candidates.append((btype, info))
 
@@ -299,7 +299,7 @@ class ConstructionSystem:
                     continue
 
                 # Chance to commission: larger settlements build more often
-                chance = 0.08 + num_buildings * 0.01
+                chance = 0.15 + num_buildings * 0.02
                 if random.random() > chance:
                     continue
 

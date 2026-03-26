@@ -47,6 +47,12 @@ class AdventureRenderer:
         self._roof_cache = {}
         self._shadow_surf = None
         self._build_tile_cache()
+        # Verify tile cache covers all terrain types — rebuild any missing
+        for tt, color in TERRAIN_COLORS.items():
+            if tt not in self._tile_cache:
+                s = pygame.Surface((TS, TS))
+                s.fill(color)
+                self._tile_cache[tt] = s
         self._build_roof_cache()
 
         # Water depth variant tiles (shallow/normal/deep + animation)
@@ -616,6 +622,12 @@ class AdventureRenderer:
         T = self.tile_size
         self._water_anim_tick += 1
         x0, y0, x1, y1 = camera.get_visible_tile_range()
+
+        # Safety: if visible_tiles is an empty set (not None), FOV hasn't
+        # been computed yet. Force-draw all tiles in visible range to avoid
+        # a black void on the first frame or after view mode switch.
+        if visible_tiles is not None and len(visible_tiles) == 0:
+            visible_tiles = None  # treat as "everything visible"
 
         # Floor level and building tracking
         player_floor = getattr(player, 'current_floor', 0) if player else 0

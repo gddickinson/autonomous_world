@@ -87,12 +87,15 @@ class TradeSystem:
         """Update caravans and spawn new ones."""
         self.trade_timer += dt
 
-        # Spawn new caravans periodically (every ~30s of accumulated dt)
-        if self.trade_timer > 30.0 and len(self.caravans) < 10:
+        # Spawn new caravans periodically (every ~15s of accumulated dt)
+        if self.trade_timer > 15.0 and len(self.caravans) < 10:
             self.trade_timer = 0.0
             if self.trade_routes:
                 route = random.choice(self.trade_routes)
                 self._spawn_caravan(route, structures, npcs, economy)
+            elif structures:
+                # No trade routes yet — auto-initialize from structures
+                self.initialize(structures)
 
         # Update existing caravans
         struct_map = {s.name: s for s in structures}
@@ -219,14 +222,14 @@ class TradeSystem:
     def passive_trade(self, structures: list, governance):
         """Daily passive trade along routes — transfers gold between treasuries.
 
-        Called once per game day. Each route has a 20% chance of generating
+        Called once per game day. Each route has a 40% chance of generating
         background trade that moves gold and generates event log entries.
         """
         struct_map = {s.name: s for s in structures}
         kingdoms = governance.kingdoms if hasattr(governance, 'kingdoms') else {}
 
         for origin_name, dest_name in self.trade_routes:
-            if random.random() > 0.20:
+            if random.random() > 0.40:
                 continue
 
             origin = struct_map.get(origin_name)

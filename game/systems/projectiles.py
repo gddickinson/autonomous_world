@@ -75,6 +75,7 @@ class CombatProjectile:
         'shooter', 'target', 'weapon_type',
         'elapsed', 'flight_time', 'arrived',
         'dx_norm', 'dy_norm', 'distance',
+        '_visual',
     )
 
     def __init__(self, start_x: float, start_y: float,

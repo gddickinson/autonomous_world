@@ -853,6 +853,11 @@ class NPC(Entity):
             magic_spd = get_speed_modifier(self)
             if magic_spd < 1.0:
                 move_speed *= magic_spd
+            # Apply exposure speed modifiers (hypothermia, heatstroke)
+            from game.systems.exposure import get_speed_modifier as _expo_spd
+            _expo_mult = _expo_spd(self)
+            if _expo_mult < 1.0:
+                move_speed *= _expo_mult
 
             still_moving = navigate_toward(self, self.target_x, self.target_y,
                                            world, move_speed, dt)

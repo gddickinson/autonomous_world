@@ -31,7 +31,8 @@ class SimDecisionsMixin:
                                        "training_animal", "seeking_bed", "fleeing",
                                        "approaching_player",
                                        "carrying", "commuting", "hunting",
-                                       "smithing", "guarding"):
+                                       "smithing", "guarding",
+                                       "seeking_shelter"):
                 continue  # busy
 
             npc.llm_decision_timer -= dt
@@ -161,12 +162,29 @@ class SimDecisionsMixin:
                     self._apply_decision(npc, decision)
                     continue
 
-                # Check schedule first - gives NPCs daily routines
+                # Daily schedule — time-based routines (sleep/work/eat/socialize)
+                from game.systems.daily_schedule import get_daily_action
+                hour = getattr(self.time_sys, 'hour', 12.0)
+                if not isinstance(hour, (int, float)):
+                    hour = getattr(self.time_sys, 'normalized', 0.5) * 24.0
+                is_storm = False
+                if hasattr(self, 'climate') and self.climate:
+                    w = getattr(self.climate, 'current_weather', None)
+                    if w:
+                        is_storm = getattr(w, 'condition', '') in ('storm', 'blizzard', 'heat_wave')
+                daily_action = get_daily_action(npc, hour, self.world, is_storm)
+                if daily_action and random.random() < 0.92:
+                    npc.current_action = daily_action
+                    npc._action_timer = random.uniform(3.0, 8.0)
+                    npc._decision_timer = random.uniform(5.0, 15.0)
+                    continue
+
+                # Fallback: check older schedule system
                 from game.systems.schedules import get_scheduled_action
                 scheduled = get_scheduled_action(
                     npc, self.time_sys.normalized, self.world, self.world.structures)
 
-                if scheduled and random.random() < 0.90:  # 90% follow schedule, 10% free will
+                if scheduled and random.random() < 0.90:
                     decision = f"{scheduled['action']} | {scheduled.get('target_x', 'nearby')} | {scheduled['reason']}"
                     if scheduled.get('target_x') is not None:
                         npc.target_x = scheduled['target_x']

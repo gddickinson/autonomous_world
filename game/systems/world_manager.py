@@ -465,6 +465,7 @@ class WorldManager:
         Other zones are populated later via activate_zone().
         """
         from game.data.dnd import random_npc_class_and_race, MONSTERS, BIOME_MAP
+        from game.data.job_classes import get_class_for_job
 
         px, py = spawn_point
         zone_radius = 500  # tiles — roughly 2-3 chunk radius
@@ -491,16 +492,17 @@ class WorldManager:
             name = spawn.get("name", name_pool[name_idx])
             name_idx += 1
 
-            char_class = spawn.get("class", "")
             race = spawn.get("race", "")
-            if not char_class or not race:
-                char_class, race = random_npc_class_and_race()
+            if not race:
+                _, race = random_npc_class_and_race()
 
             level = rng.randint(1, 5)
             profession = spawn.get("profession", "")
             if not profession:
                 profession = self._pick_settlement_profession(
-                    float(sx), float(sy), rng) or char_class
+                    float(sx), float(sy), rng) or "Laborer"
+            # Derive class from profession (not random)
+            char_class = get_class_for_job(profession)
             npc = NPC(float(sx), float(sy), name, profession,
                      char_class=char_class, race=race, level=level)
             npc.home_x = float(sx)

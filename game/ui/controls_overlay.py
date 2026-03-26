@@ -1,71 +1,42 @@
 """Full-screen controls overlay: press ? to show, ? or Esc to dismiss.
 
 Lists all game controls organised by category on a semi-transparent
-dark background.
+dark background. Uses the shared KEY_BINDINGS data from help_screen.py
+so both overlays stay in sync.
 """
 
 import pygame
 from game.settings import SCREEN_WIDTH, SCREEN_HEIGHT, UI_TEXT, UI_HIGHLIGHT
+from game.ui.key_bindings import KEY_BINDINGS
+
+# Build a flat list of (category, bindings) for the full overlay.
+# We show ALL bindings regardless of context, grouped by category.
+# Skip god sub-menus to keep the overlay readable.
+_SKIP_TAGS = {"god_events", "god_kingdom", "god_spawn", "god_divine_realm",
+              "god_panel", "dead", "quest_board", "fast_travel"}
 
 
-# ----------------------------------------------------------------
-# Control definitions: (category, [(key_label, action), ...])
-# ----------------------------------------------------------------
+def _build_all_controls():
+    """Merge all KEY_BINDINGS into category groups for the full overlay."""
+    groups = []
+    seen = {}
+    for tag, category, bindings in KEY_BINDINGS:
+        if tag in _SKIP_TAGS:
+            continue
+        if category in seen:
+            # Append to existing, avoiding duplicates
+            existing = groups[seen[category]][1]
+            existing_set = {(k, a) for k, a in existing}
+            for k, a in bindings:
+                if (k, a) not in existing_set:
+                    existing.append((k, a))
+        else:
+            seen[category] = len(groups)
+            groups.append((category, list(bindings)))
+    return groups
 
-CONTROLS = [
-    ("Movement", [
-        ("W / A / S / D", "Move character"),
-        ("Shift + Move", "Sprint"),
-        ("Arrow Keys", "Scroll camera (strategy view)"),
-    ]),
-    ("Combat", [
-        ("Space", "Attack / swing weapon"),
-        ("F1", "Power Strike ability"),
-        ("F2", "Whirlwind ability"),
-        ("F3", "Keen Eye ability"),
-        ("F4", "Charm ability"),
-        ("F5", "Scout ability"),
-        ("1-9", "Cast spell from hotbar"),
-    ]),
-    ("Magic", [
-        ("1-9", "Cast assigned spell"),
-        ("F6", "Cycle overlay mode"),
-    ]),
-    ("Interaction", [
-        ("E", "Interact / talk / pick up / enter"),
-        ("T", "Free-text talk to NPC"),
-        ("X", "Examine object"),
-        ("G", "Drop selected item"),
-        ("R", "Recruit companion"),
-        ("Tab", "Cycle nearby NPC"),
-    ]),
-    ("Inventory & Character", [
-        ("I", "Open / close inventory"),
-        ("C", "Character sheet"),
-        ("U", "Crafting menu"),
-        ("O", "Skill tree"),
-    ]),
-    ("UI Panels", [
-        ("Q", "Quest log"),
-        ("H", "Chronicle / history"),
-        ("B", "Settlement info panel"),
-        ("L", "Combat log"),
-        ("?", "This controls overlay"),
-    ]),
-    ("Map & Camera", [
-        ("M", "Planet / globe view"),
-        ("F", "World map"),
-        ("N", "Toggle minimap"),
-        ("V", "Cycle view mode"),
-        ("Z", "Interior zoom toggle"),
-    ]),
-    ("System", [
-        ("P", "Toggle auto-play"),
-        ("Y", "Fast travel"),
-        ("Esc", "Pause / close panel"),
-        ("F7", "Skip tutorial step"),
-    ]),
-]
+
+CONTROLS = _build_all_controls()
 
 # Layout constants
 BG_ALPHA = 200
@@ -133,8 +104,9 @@ class ControlsOverlay:
         # Title
         title = self.font_lg.render("CONTROLS", True, TITLE_COLOR)
         screen.blit(title, ((SCREEN_WIDTH - title.get_width()) // 2, 18))
-        hint = self.font_sm.render("Press ? or Esc to close", True,
-                                    (140, 140, 160))
+        hint = self.font_sm.render(
+            "Press ? or Esc to close  |  Shift+H for context help",
+            True, (140, 140, 160))
         screen.blit(hint, ((SCREEN_WIDTH - hint.get_width()) // 2, 46))
 
         # Render controls in two columns

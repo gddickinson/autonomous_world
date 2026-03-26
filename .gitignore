@@ -12,3 +12,13 @@
 /viewers/__pycache__
 /game/audio/__pycache__
 .DS_Store
+/tests/__pycache__
+/viewers/final_playtest_output
+/viewers/full_playtest_output
+/viewers/god_playtest_output
+/viewers/assessment_output
+/viewers/evolution_output
+/viewers/god_realm_output
+/viewers/graphics_test_output
+/viewers/mortal_playtest_output
+/viewers/playtest_output

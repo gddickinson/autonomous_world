@@ -14,6 +14,9 @@ from game.core.items import Item
 from game.ui.character_anim import (
     get_anim, update_anim, draw_npc_body, draw_creature_body
 )
+from game.ui.character_detail import (
+    draw_fireball, draw_arrow_projectile, draw_lightning_bolt, draw_ice_shard
+)
 from game.ui.mount_render import is_mounted, draw_mounted_entity
 from game.ui.combat_effects import CombatEffects
 from game.ui.object_sprites import (
@@ -70,6 +73,10 @@ class Renderer:
 
         # Particle effects
         self.particles: List[dict] = []
+
+        # Ambient atmospheric particle system
+        from game.ui.ambient_particles import AmbientParticleSystem
+        self.ambient_particles = AmbientParticleSystem()
 
         self._dimmed_cache = {}
         self._dim_overlay_cache = {}
@@ -243,7 +250,7 @@ class Renderer:
         self._seasonal_color_cache[(MARSH, "autumn")] = (95, 100, 50)
         self._seasonal_color_cache[(FRUIT_TREE, "autumn")] = (170, 90, 40)
         self._seasonal_color_cache[(HERB_PATCH, "autumn")] = (100, 110, 50)
-        self._seasonal_color_cache[(FLOWER_BED, "autumn")] = (140, 100, 70)
+        self._seasonal_color_cache[(FLOWER_BED, "autumn")] = (100, 120, 55)
 
         # --- WINTER: white/gray on grass/forest, frozen water ---
         self._seasonal_color_cache[(GRASS, "winter")] = (170, 175, 160)
@@ -269,7 +276,9 @@ class Renderer:
         self._seasonal_color_cache[(TILLED_SOIL, "summer")] = (100, 85, 50)
         self._seasonal_color_cache[(TILLED_SOIL, "autumn")] = (110, 95, 60)
         self._seasonal_color_cache[(TILLED_SOIL, "winter")] = (130, 120, 100)
-        self._seasonal_color_cache[(FLOWER_BED, "winter")] = (160, 155, 145)
+        self._seasonal_color_cache[(FLOWER_BED, "winter")] = (140, 148, 128)
+        self._seasonal_color_cache[(FLOWER_BED, "spring")] = (95, 165, 70)
+        self._seasonal_color_cache[(FLOWER_BED, "summer")] = (80, 148, 58)
 
     def _build_seasonal_tile_cache(self, season: str):
         """Build pre-rendered tile surfaces for a given season.
@@ -434,25 +443,34 @@ class Renderer:
                                      (px_h, py_h), (px_h, py_h - TILE_SIZE // 4))
 
             elif terrain_type == FLOWER_BED:
+                # Green grass base for all seasons
+                surf.fill(color)
+                ts = TILE_SIZE
                 if season == "winter":
-                    # Dead flowers, brown
-                    for i in range(4):
-                        fx = (hash(i * 7) % (TILE_SIZE - 4)) + 2
-                        fy = (hash(i * 13) % (TILE_SIZE - 4)) + 2
-                        pygame.draw.circle(surf, (130, 115, 95), (fx, fy), max(1, TILE_SIZE // 8))
+                    # Dead/sparse flowers on muted green
+                    for i in range(3):
+                        fx = (hash(i * 7) % (ts - 4)) + 2
+                        fy = (hash(i * 13) % (ts - 4)) + 2
+                        pygame.draw.circle(surf, (160, 145, 120), (fx, fy), max(1, ts // 12))
                 elif season == "autumn":
-                    colors = [(180, 100, 50), (160, 80, 40), (140, 90, 60), (170, 120, 50)]
-                    for i, fc in enumerate(colors):
-                        fx = (hash(i * 7) % (TILE_SIZE - 4)) + 2
-                        fy = (hash(i * 13) % (TILE_SIZE - 4)) + 2
-                        pygame.draw.circle(surf, fc, (fx, fy), max(1, TILE_SIZE // 8))
+                    # Warm muted tones — golden/orange-ish small flowers
+                    flower_c = [(200, 160, 60), (180, 120, 50), (160, 100, 50), (190, 170, 80)]
+                    for i, fc in enumerate(flower_c):
+                        fx = (hash(i * 7) % (ts - 4)) + 2
+                        fy = (hash(i * 13) % (ts - 4)) + 2
+                        pygame.draw.circle(surf, fc, (fx, fy), max(1, ts // 10))
                 else:
-                    # Spring: extra vibrant flowers
-                    colors = [(230, 80, 100), (240, 230, 80), (170, 80, 220), (80, 170, 230)]
-                    for i, fc in enumerate(colors):
-                        fx = (hash(i * 7) % (TILE_SIZE - 4)) + 2
-                        fy = (hash(i * 13) % (TILE_SIZE - 4)) + 2
-                        pygame.draw.circle(surf, fc, (fx, fy), max(1, TILE_SIZE // 8))
+                    # Spring/summer: bright but naturalistic small flowers
+                    for i in range(3):
+                        gx = (hash(i * 11 + 3) % (ts - 2)) + 1
+                        gy = (hash(i * 17 + 5) % (ts - 2)) + 1
+                        pygame.draw.line(surf, (max(0, r - 20), min(255, g + 5), max(0, b - 15)),
+                                         (gx, gy), (gx, gy - max(2, ts // 5)))
+                    flower_c = [(240, 240, 200), (220, 200, 80), (200, 130, 140), (160, 200, 120)]
+                    for i, fc in enumerate(flower_c):
+                        fx = (hash(i * 7 + 99) % (ts - 4)) + 2
+                        fy = (hash(i * 13 + 77) % (ts - 4)) + 2
+                        pygame.draw.circle(surf, fc, (fx, fy), max(1, ts // 10))
 
             self._seasonal_tile_cache[(terrain_type, season)] = surf
 
@@ -579,14 +597,26 @@ class Renderer:
             surf = pygame.Surface((TILE_SIZE, TILE_SIZE))
             r, g, b = base
             surf.fill(base)
-            # Horizontal line pattern (roof tiles/thatch)
-            for i in range(0, TILE_SIZE, 4):
-                shade = r - 12 + (i % 8)
-                pygame.draw.line(surf, (max(0, shade), max(0, g - 10), max(0, b - 8)),
-                                (0, i), (TILE_SIZE, i))
+            ts = TILE_SIZE
+            # Shingle/tile rows with offset per row (like real roof tiles)
+            row_h = max(2, ts // 5)
+            for row_i, py in enumerate(range(0, ts, row_h)):
+                offset = (row_h // 2) if (row_i % 2) else 0
+                # Each shingle in the row
+                shingle_w = max(3, ts // 3)
+                for px in range(offset - shingle_w, ts + shingle_w, shingle_w):
+                    shade = ((px + row_i * 5) % 7) - 3
+                    sr = max(0, min(255, r + shade * 2))
+                    sg = max(0, min(255, g + shade))
+                    sb = max(0, min(255, b + shade))
+                    pygame.draw.rect(surf, (sr, sg, sb),
+                                     (px, py, shingle_w - 1, row_h - 1))
+                # Row gap line
+                pygame.draw.line(surf, (max(0, r - 18), max(0, g - 16), max(0, b - 12)),
+                                 (0, py), (ts, py))
             # Ridge line down the middle
             pygame.draw.line(surf, (max(0, r - 25), max(0, g - 25), max(0, b - 20)),
-                            (TILE_SIZE // 2, 0), (TILE_SIZE // 2, TILE_SIZE))
+                            (ts // 2, 0), (ts // 2, ts))
             self._roof_cache[kind] = surf
 
             # Also make dimmed version
@@ -2606,23 +2636,26 @@ class Renderer:
                     trail_surf.fill((p.color[0], p.color[1], p.color[2], alpha))
                     self.screen.blit(trail_surf, (int(tsx), int(tsy)))
 
-                # Projectile body
-                if p.kind == "arrow":
-                    # Line in direction of travel
+                # Projectile body — use enhanced drawing functions
+                if p.kind in ("arrow", "bolt"):
                     dx = p.target_x - p.x
                     dy = p.target_y - p.y
                     d = max(0.01, math.sqrt(dx * dx + dy * dy))
-                    ex = ix + int(dx / d * 4)
-                    ey = iy + int(dy / d * 4)
-                    pygame.draw.line(self.screen, p.color, (ix, iy), (ex, ey), 2)
-                    # Arrowhead
-                    pygame.draw.circle(self.screen, (255, 220, 100), (ex, ey), 1)
+                    tail_len = max(6, p.size * 3)
+                    tail_x = ix - int(dx / d * tail_len)
+                    tail_y = iy - int(dy / d * tail_len)
+                    draw_arrow_projectile(self.screen, tail_x, tail_y,
+                                          ix, iy, p.color)
+                elif p.kind == "fire":
+                    draw_fireball(self.screen, ix, iy,
+                                  max(3, p.size))
                 elif p.kind == "stone":
                     pygame.draw.circle(self.screen, p.color, (ix, iy), p.size)
-                    pygame.draw.circle(self.screen, (100, 90, 80), (ix, iy), p.size, 1)
-                elif p.kind == "fire":
-                    pygame.draw.circle(self.screen, (240, 160, 40), (ix, iy), p.size)
-                    pygame.draw.circle(self.screen, (255, 220, 80), (ix, iy), p.size - 1)
+                    pygame.draw.circle(self.screen, (100, 90, 80),
+                                       (ix, iy), p.size, 1)
+                    # Add cracks
+                    pygame.draw.line(self.screen, (80, 70, 60),
+                                     (ix - 1, iy - 1), (ix + 1, iy + 1))
                 else:
                     pygame.draw.circle(self.screen, p.color, (ix, iy), p.size)
 
@@ -2666,6 +2699,15 @@ class Renderer:
           Night    (21:00-5:00):  dark blue overlay
         """
         t = game_time_normalized  # 0.0 - 1.0
+
+        # Store darkness estimate for ambient particles
+        # Night is roughly t < 0.2083 or t > 0.875
+        if t < 5.0 / 24.0 or t > 21.0 / 24.0:
+            self._last_darkness = 0.8
+        elif t > 19.0 / 24.0:
+            self._last_darkness = 0.4
+        else:
+            self._last_darkness = 0.0
 
         # Convert to 24-hour fractions
         dawn_start  = 5.0 / 24.0    # 0.2083
@@ -2847,7 +2889,7 @@ class Renderer:
 
     def draw_minimap(self, world: World, player: Player, npcs: list, creatures: list,
                      show_minimap: bool = False):
-        """Draw minimap in corner. Off by default — toggle with N key."""
+        """Draw enhanced minimap with terrain colors, NPC/creature dots, pulse."""
         if not show_minimap:
             return
 
@@ -2861,7 +2903,7 @@ class Renderer:
 
         # Background
         bg = pygame.Surface((mm_w + 4, mm_h + 4), pygame.SRCALPHA)
-        bg.fill((0, 0, 0, 160))
+        bg.fill((0, 0, 0, 180))
         self.screen.blit(bg, (mm_x - 2, mm_y - 2))
 
         # Draw terrain
@@ -2882,23 +2924,86 @@ class Renderer:
         sx_scale = mm_w / world.width
         sy_scale = mm_h / world.height
 
-        # Draw structures
+        # Draw structures (color-coded by type)
+        _struct_colors = {
+            "village": (255, 200, 100),
+            "town": (200, 200, 220),
+            "city": (255, 220, 100),
+            "castle": (255, 240, 120),
+            "hamlet": (140, 180, 140),
+            "ruins": (200, 100, 100),
+        }
         for s in world.structures:
             dot_x = int(mm_x + s.x * sx_scale)
             dot_y = int(mm_y + s.y * sy_scale)
-            if s.kind == "village":
-                pygame.draw.circle(self.screen, (255, 200, 100), (dot_x, dot_y), 3)
-            elif s.kind == "ruins":
-                pygame.draw.circle(self.screen, (200, 100, 100), (dot_x, dot_y), 2)
+            color = _struct_colors.get(s.kind, (180, 180, 180))
+            size = 3 if s.kind in ("city", "castle") else 2
+            pygame.draw.circle(self.screen, color, (dot_x, dot_y), size)
 
-        # Draw player
+        # Draw nearby NPCs as yellow dots (only within ~100 tiles of player)
+        view_range = 100
+        for npc in npcs:
+            if not getattr(npc, 'alive', True):
+                continue
+            dx = abs(npc.x - player.x)
+            dy = abs(npc.y - player.y)
+            if dx > view_range or dy > view_range:
+                continue
+            nx = int(mm_x + npc.x * sx_scale)
+            ny = int(mm_y + npc.y * sy_scale)
+            if mm_x <= nx < mm_x + mm_w and mm_y <= ny < mm_y + mm_h:
+                pygame.draw.circle(self.screen, (240, 220, 80), (nx, ny), 1)
+
+        # Draw hostile creatures as red dots
+        for cr in creatures:
+            if not getattr(cr, 'alive', True):
+                continue
+            dx = abs(cr.x - player.x)
+            dy = abs(cr.y - player.y)
+            if dx > view_range or dy > view_range:
+                continue
+            cx_m = int(mm_x + cr.x * sx_scale)
+            cy_m = int(mm_y + cr.y * sy_scale)
+            if mm_x <= cx_m < mm_x + mm_w and mm_y <= cy_m < mm_y + mm_h:
+                hostile = getattr(cr, 'hostile', True)
+                dot_color = (220, 60, 60) if hostile else (100, 200, 100)
+                pygame.draw.circle(self.screen, dot_color, (cx_m, cy_m), 1)
+
+        # Draw quest objective markers as gold stars
+        quests = getattr(player, 'quests', [])
+        for q in quests:
+            tx = getattr(q, 'target_x', None)
+            ty = getattr(q, 'target_y', None)
+            if tx is not None and ty is not None:
+                qx = int(mm_x + tx * sx_scale)
+                qy = int(mm_y + ty * sy_scale)
+                if mm_x <= qx < mm_x + mm_w and mm_y <= qy < mm_y + mm_h:
+                    pygame.draw.circle(self.screen, (255, 215, 0), (qx, qy), 2)
+
+        # Draw player with pulse effect
         px = int(mm_x + player.x * sx_scale)
         py = int(mm_y + player.y * sy_scale)
-        pygame.draw.circle(self.screen, (100, 200, 255), (px, py), 3)
-        pygame.draw.circle(self.screen, WHITE, (px, py), 3, 1)
+
+        # Pulse: oscillating outline radius
+        import time as _time
+        pulse_t = _time.time() % 1.5
+        pulse_r = 3 + int(2.0 * abs(math.sin(pulse_t * math.pi / 1.5)))
+        pulse_alpha = int(200 * (1.0 - abs(math.sin(pulse_t * math.pi / 1.5)) * 0.5))
+
+        pulse_surf = pygame.Surface((pulse_r * 2 + 2, pulse_r * 2 + 2), pygame.SRCALPHA)
+        pygame.draw.circle(pulse_surf, (255, 255, 255, pulse_alpha),
+                           (pulse_r + 1, pulse_r + 1), pulse_r, 1)
+        self.screen.blit(pulse_surf, (px - pulse_r - 1, py - pulse_r - 1))
+
+        # Bright white center dot
+        pygame.draw.circle(self.screen, WHITE, (px, py), 2)
 
         # Border
         pygame.draw.rect(self.screen, UI_BORDER, (mm_x - 2, mm_y - 2, mm_w + 4, mm_h + 4), 1)
+
+        # Label
+        label = self.font_sm.render("Minimap [N]", True, (160, 160, 180))
+        self.screen.blit(label, (mm_x, mm_y + mm_h + 4))
 
     def draw_particles(self, camera: Camera, dt: float, player=None):
         """Update and draw particle effects (core + ambient effects)."""
@@ -2945,6 +3050,14 @@ class Renderer:
         self._update_swing_arcs(camera, dt)
         self._update_leaf_particles(camera, dt, px, py)
         self._update_water_ripples(camera, dt, px, py)
+
+        # --- Atmospheric ambient particles (stars, fireflies, dust, etc.) ---
+        is_night = getattr(self, '_last_darkness', 0) > 0.3
+        biome = "grass"  # default; derive from player tile if available
+        weather = getattr(self, '_weather_condition', "clear")
+        self.ambient_particles.update(dt, self._current_season, is_night,
+                                       biome, weather, False)
+        self.ambient_particles.draw(self.screen)
 
     # ================================================================
     # WEATHER VISUAL EFFECTS
@@ -4207,62 +4320,40 @@ class Renderer:
         self._spell_effects = alive
 
     def _draw_fireball_effect(self, effect, camera, progress, alpha_factor):
-        """Draw expanding orange circle for fireball."""
+        """Draw expanding fireball using enhanced multi-layer renderer."""
         sx, sy = camera.world_to_screen(effect["x"], effect["y"])
         if not (-100 < sx < SCREEN_WIDTH + 100 and -100 < sy < SCREEN_HEIGHT + 100):
             return
         radius = effect["radius"] + (effect["max_radius"] - effect["radius"]) * progress
-        screen_r = max(2, int(radius * TILE_SIZE))
-        alpha = int(180 * alpha_factor)
-        # Outer glow
-        glow_surf = pygame.Surface((screen_r * 2 + 4, screen_r * 2 + 4), pygame.SRCALPHA)
-        pygame.draw.circle(glow_surf, (255, 140, 30, alpha // 2),
-                           (screen_r + 2, screen_r + 2), screen_r + 2)
-        # Inner bright core
-        core_r = max(1, screen_r // 2)
-        pygame.draw.circle(glow_surf, (255, 200, 80, alpha),
-                           (screen_r + 2, screen_r + 2), core_r)
-        self.screen.blit(glow_surf, (sx - screen_r - 2, sy - screen_r - 2))
+        screen_r = max(3, int(radius * TILE_SIZE))
+        # Use the enhanced fireball drawer from character_detail
+        draw_fireball(self.screen, sx, sy, screen_r)
 
     def _draw_ice_effect(self, effect, camera, progress, alpha_factor):
-        """Draw ice crystal flash at impact point."""
+        """Draw crystalline ice shards at impact point."""
         sx, sy = camera.world_to_screen(effect["x"], effect["y"])
         if not (-50 < sx < SCREEN_WIDTH + 50 and -50 < sy < SCREEN_HEIGHT + 50):
             return
-        alpha = int(200 * alpha_factor)
-        # Draw radiating ice shards (lines from center)
-        for i in range(6):
-            angle = math.radians(i * 60 + progress * 30)
-            length = (10 + progress * 15) * TILE_SIZE / 16
-            ex = sx + math.cos(angle) * length
-            ey = sy + math.sin(angle) * length
-            color = (150, 200, 255, alpha)
-            shard_surf = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
-            pygame.draw.line(shard_surf, color,
-                             (int(sx), int(sy)), (int(ex), int(ey)), 2)
-            self.screen.blit(shard_surf, (0, 0))
+        # Draw main ice shard at center
+        size = max(4, int((6 + progress * 10) * TILE_SIZE / 16))
+        draw_ice_shard(self.screen, sx, sy, size)
+        # Additional radiating shards
+        for i in range(4):
+            angle = math.radians(i * 90 + progress * 30)
+            dist = (5 + progress * 12) * TILE_SIZE / 16
+            ex = sx + math.cos(angle) * dist
+            ey = sy + math.sin(angle) * dist
+            draw_ice_shard(self.screen, ex, ey, max(2, size // 2))
 
     def _draw_lightning_effect(self, effect, camera, progress, alpha_factor):
-        """Draw zigzag lightning bolt."""
+        """Draw zigzag lightning bolt with branches."""
         segments = effect.get("segments", [])
         if len(segments) < 2:
             return
-        alpha = int(255 * alpha_factor)
-        # Convert all segment points to screen coordinates
-        screen_points = []
-        for wx, wy in segments:
-            sx, sy = camera.world_to_screen(wx, wy)
-            screen_points.append((int(sx), int(sy)))
-
-        # Main bolt (bright white)
-        if len(screen_points) >= 2:
-            bolt_surf = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
-            pygame.draw.lines(bolt_surf, (255, 255, 255, alpha),
-                              False, screen_points, 3)
-            # Glow (wider, dimmer)
-            pygame.draw.lines(bolt_surf, (150, 150, 255, alpha // 3),
-                              False, screen_points, 6)
-            self.screen.blit(bolt_surf, (0, 0))
+        # Convert endpoints to screen coordinates and use enhanced drawer
+        sx1, sy1 = camera.world_to_screen(segments[0][0], segments[0][1])
+        sx2, sy2 = camera.world_to_screen(segments[-1][0], segments[-1][1])
+        draw_lightning_bolt(self.screen, sx1, sy1, sx2, sy2)
 
     def _draw_heal_effect(self, effect, camera, progress, alpha_factor):
         """Draw gentle green glow for healing."""

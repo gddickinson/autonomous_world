@@ -4,13 +4,16 @@ import math
 import pygame
 from game.settings import TILE_SIZE
 import game.ui.profession_sprites as _prof_sprites
+from game.ui.character_detail import (
+    draw_detailed_head, draw_detailed_eyes, draw_detailed_torso,
+    draw_detailed_arm, draw_detailed_legs, _race_width,
+)
 
 _sin = math.sin
 _cos = math.cos
 _sqrt = math.sqrt
 _tau = math.tau
 
-# ── Skin tones by race ──────────────────────────────────────────────────
 SKIN_TONES = {
     "human":    (210, 185, 155),
     "elf":      (220, 205, 175),
@@ -24,7 +27,6 @@ SKIN_TONES = {
     "dragonborn": (160, 170, 150),
 }
 
-# ── Equipment colors ────────────────────────────────────────────────────
 ARMOR_TINTS = {
     "Fighter":   (170, 175, 185),
     "Paladin":   (190, 195, 210),
@@ -36,7 +38,6 @@ ARMOR_TINTS = {
     "Soldier":   (145, 150, 160),
 }
 
-# ── Race sizes (module-level, not rebuilt per call) ──────────────────────
 _RACE_SIZES = {
     "halfling": 0.7, "gnome": 0.7, "goblin": 0.7,
     "dwarf": 0.85,
@@ -46,7 +47,6 @@ _RACE_SIZES = {
     "goliath": 1.3,
 }
 
-# ── Creature type sets (module-level) ───────────────────────────────────
 _PASSIVE_TYPES = frozenset({"deer", "rabbit", "chicken", "cow", "pig", "sheep",
                             "goat", "horse", "elk", "pheasant", "fox", "fish_school"})
 _BEAST_TYPES = frozenset({"wolf", "bear", "boar", "dire_wolf", "owlbear", "wild_boar"})
@@ -54,7 +54,6 @@ _HUMANOID_TYPES = frozenset({"bandit", "goblin", "orc", "gnoll", "bugbear", "ske
                              "zombie", "kobold", "hobgoblin"})
 _LARGE_TYPES = frozenset({"ogre", "troll", "hill_giant", "minotaur", "young_dragon"})
 
-# ── Armed/mage sets (module-level) ──────────────────────────────────────
 _ARMED_MELEE_CLASSES = frozenset({"Fighter", "Paladin", "Barbarian", "Rogue", "Ranger"})
 _ARMED_MELEE_PROFS = frozenset({"Guard", "Soldier", "Knight", "Mercenary"})
 _ARMED_RANGED = frozenset({"Ranger", "Archer"})
@@ -72,7 +71,6 @@ _EYE_COLOR = (40, 40, 40)
 _RED_EYE = (200, 40, 40)
 _BROWN_EYE = (60, 40, 20)
 
-# ── Color cache ─────────────────────────────────────────────────────────
 _darken_cache = {}
 _lighten_cache = {}
 
@@ -98,20 +96,14 @@ def _lighten(color, amount=30):
     _lighten_cache[key] = result
     return result
 
-
 def _get_skin(race: str) -> tuple:
     return SKIN_TONES.get(race.lower() if race else "", (210, 185, 155))
-
 
 def _race_size(race: str) -> float:
     return _RACE_SIZES.get(race.lower() if race else "", 1.0)
 
-
-# ── Spider leg precomputation ───────────────────────────────────────────
-_SPIDER_ANGLES = []
-for _a in range(0, 360, 45):
-    _r = math.radians(_a)
-    _SPIDER_ANGLES.append((math.cos(_r), math.sin(_r)))
+_SPIDER_ANGLES = [(math.cos(math.radians(a)), math.sin(math.radians(a)))
+                   for a in range(0, 360, 45)]
 
 
 class AnimState:
@@ -143,7 +135,6 @@ def get_anim(entity) -> AnimState:
         entity._anim = anim
     return anim
 
-
 def update_anim(entity, dt: float):
     """Update animation state based on entity movement and status."""
     anim = get_anim(entity)
@@ -173,8 +164,6 @@ def update_anim(entity, dt: float):
         if anim.death_timer >= 1.0:
             anim.death_done = True
 
-
-# ── NPC Drawing ─────────────────────────────────────────────────────────
 
 def draw_npc_body(screen, npc, sx: int, sy: int, s: int, mounted=False):
     """Draw an NPC with assembled body parts and animation.
@@ -306,53 +295,55 @@ def draw_npc_body(screen, npc, sx: int, sy: int, s: int, mounted=False):
 
     draw = pygame.draw
 
+    # ── Race width adjustment ─────────────────────────────────────
+    race = getattr(npc, 'race', 'human')
+    width_mult = _race_width(race)
+    torso_w = max(3, int(torso_w * width_mult))
+    torso_x = sx - torso_w // 2
+    la_x = torso_x - arm_w
+    ra_x = torso_x + torso_w
+
+    has_robe = char_class in ("Wizard", "Sorcerer", "Warlock", "Druid",
+                               "Cleric", "Bard")
+
     # ── Legs (skip when mounted — rider is sitting) ─────────────────
     if not mounted:
-        lx = sx - rs
-        rx = sx + rs - leg_w
-        l_leg_y = hip_y + leg_swing + breath_offset
-        r_leg_y = hip_y - leg_swing + breath_offset
-        draw.rect(screen, dark_body, (lx, l_leg_y, leg_w, leg_h))
-        draw.rect(screen, dark_body, (rx, r_leg_y, leg_w, leg_h))
-        foot_h = max(1, rs // 2)
-        draw.rect(screen, dark_body2, (lx - 1, l_leg_y + leg_h, leg_w + 2, foot_h))
-        draw.rect(screen, dark_body2, (rx - 1, r_leg_y + leg_h, leg_w + 2, foot_h))
+        draw_detailed_legs(screen, sx, hip_y, rs, leg_w, leg_h, dark_body,
+                           leg_swing, breath_offset, dark_body2,
+                           has_robe=has_robe, race=race)
 
-    # ── Torso ──────────────────────────────────────────────────────
-    br = max(1, rs // 2)
-    draw.rect(screen, torso_color, (torso_x, torso_y, torso_w, torso_h),
-              border_radius=br)
-    if rs >= 3:
-        draw.rect(screen, dark_torso, (torso_x, torso_y, torso_w, torso_h),
-                  1, border_radius=br)
+    # ── Torso (enhanced with collar, belt, armor texture) ──────────
+    draw_detailed_torso(screen, torso_x, torso_y, torso_w, torso_h,
+                        torso_color, rs, char_class=char_class,
+                        armored=armored)
 
-    # ── Arms ─────────────────────────────────────────────────────
+    # ── Arms (enhanced with hands) ─────────────────────────────────
     arm_color = prof_arms if prof_arms else skin
     l_arm_y = arm_top + arm_swing
     r_arm_y = arm_top - arm_swing
     if fleeing:
-        # Arms raised: draw shorter, higher up
-        draw.rect(screen, arm_color, (la_x, torso_y - rs, arm_w, arm_h // 2))
-        draw.rect(screen, arm_color, (ra_x, torso_y - rs, arm_w, arm_h // 2))
+        draw_detailed_arm(screen, la_x, torso_y - rs, arm_w, arm_h // 2,
+                          arm_color, rs, skin_color=skin)
+        draw_detailed_arm(screen, ra_x, torso_y - rs, arm_w, arm_h // 2,
+                          arm_color, rs, skin_color=skin)
         l_arm_y = torso_y - rs
         r_arm_y = torso_y - rs
     else:
-        # Talking gesture: extend right arm outward slightly
         _ra_draw_x = ra_x + _talk_arm_dx if _talking else ra_x
-        draw.rect(screen, arm_color, (la_x, l_arm_y, arm_w, arm_h))
-        draw.rect(screen, arm_color, (_ra_draw_x, r_arm_y, arm_w, arm_h))
+        draw_detailed_arm(screen, la_x, l_arm_y, arm_w, arm_h,
+                          arm_color, rs, skin_color=skin)
+        draw_detailed_arm(screen, _ra_draw_x, r_arm_y, arm_w, arm_h,
+                          arm_color, rs, skin_color=skin)
 
-    # ── Head ───────────────────────────────────────────────────────
-    draw.circle(screen, skin, (head_x, head_y), head_r)
+    # ── Head (enhanced with hair, ears, nose) ──────────────────────
+    entity_id = id(npc) % 10000
+    facing = getattr(npc, 'facing', (0, 1))
+    draw_detailed_head(screen, skin, head_x, head_y, head_r, rs, race,
+                       entity_id, facing=facing, talking=_talking)
 
-    # ── Eyes ───────────────────────────────────────────────────────
-    if rs >= 2:
-        eye_r = max(1, rs // 3)
-        fx, fy = getattr(npc, 'facing', (0, 1))
-        eox = int(fx * rs * 0.3)
-        eye_y = head_y - max(1, rs // 4) + int(fy * rs * 0.2)
-        draw.circle(screen, _EYE_COLOR, (head_x - eye_r - 1 + eox, eye_y), eye_r)
-        draw.circle(screen, _EYE_COLOR, (head_x + eye_r + 1 + eox, eye_y), eye_r)
+    # ── Eyes (enhanced with sclera and pupils) ─────────────────────
+    draw_detailed_eyes(screen, head_x, head_y, head_r, rs,
+                       facing=facing, eye_color=_EYE_COLOR)
 
     # ── Profession head decoration (hat/helmet) ────────────────────
     _prof_sprites.draw_profession_head(screen, profession, head_x, head_y, head_r, rs)
@@ -463,72 +454,46 @@ def _draw_staff(screen, draw, hx, hy, rs, orb_color):
 def _draw_death(screen, npc, sx, sy, s, anim, body_color):
     """Draw death — collapse animation then skull and crossbones."""
     t = anim.death_timer
-    race = getattr(npc, 'race', 'human')
-    rs = max(1, int(s * _race_size(race)))
-
+    rs = max(1, int(s * _race_size(getattr(npc, 'race', 'human'))))
     if anim.death_done:
-        # Final state: skull and crossbones
         _draw_skull(screen, sx, sy, rs)
         return
-
-    # Collapse animation (t: 0→1)
-    squash_y = 1.0 - t * 0.7
-    stretch_x = 1.0 + t * 0.5
-    torso_w = max(3, int(rs * 3 * stretch_x))
-    torso_h = max(2, int(rs * 3 * squash_y))
-    torso_y = sy - rs + int(t * rs * 2)
+    tw = max(3, int(rs * 3 * (1.0 + t * 0.5)))
+    th = max(2, int(rs * 3 * (1.0 - t * 0.7)))
+    ty = sy - rs + int(t * rs * 2)
     alpha = max(40, int(255 * (1.0 - t * 0.6)))
-
-    surf = pygame.Surface((torso_w + 4, torso_h + 4), pygame.SRCALPHA)
-    pygame.draw.rect(surf, (*body_color, alpha), (2, 2, torso_w, torso_h),
+    surf = pygame.Surface((tw + 4, th + 4), pygame.SRCALPHA)
+    pygame.draw.rect(surf, (*body_color, alpha), (2, 2, tw, th),
                      border_radius=max(1, rs // 2))
-    screen.blit(surf, (sx - torso_w // 2 - 2, torso_y - 2))
+    screen.blit(surf, (sx - tw // 2 - 2, ty - 2))
 
 
 def _draw_skull(screen, sx, sy, rs):
     """Draw a small skull and crossbones icon."""
     draw = pygame.draw
-    bone = (210, 200, 180)
-    dark = (160, 150, 130)
-
+    bone, dark = (210, 200, 180), (160, 150, 130)
     skull_r = max(2, rs + 1)
-
-    # Crossbones behind skull
-    bone_len = max(3, rs * 2)
-    bone_w = max(1, rs // 3)
-    draw.line(screen, bone,
-              (sx - bone_len, sy + skull_r // 2),
+    bone_len, bone_w = max(3, rs * 2), max(1, rs // 3)
+    draw.line(screen, bone, (sx - bone_len, sy + skull_r // 2),
               (sx + bone_len, sy - skull_r + 2), bone_w)
-    draw.line(screen, bone,
-              (sx - bone_len, sy - skull_r + 2),
+    draw.line(screen, bone, (sx - bone_len, sy - skull_r + 2),
               (sx + bone_len, sy + skull_r // 2), bone_w)
-    # Bone knobs at ends
     knob_r = max(1, rs // 3)
     for bx, by in [(sx - bone_len, sy + skull_r // 2),
                     (sx + bone_len, sy + skull_r // 2),
                     (sx - bone_len, sy - skull_r + 2),
                     (sx + bone_len, sy - skull_r + 2)]:
         draw.circle(screen, bone, (bx, by), knob_r)
-
-    # Skull (rounded head shape)
     draw.circle(screen, bone, (sx, sy - skull_r // 2), skull_r)
-    # Jaw (smaller arc below)
-    jaw_w = max(2, skull_r + rs // 2)
-    jaw_h = max(1, skull_r // 2)
-    draw.ellipse(screen, dark, (sx - jaw_w // 2, sy, jaw_w, jaw_h))
-
-    # Eye sockets (dark circles)
+    draw.ellipse(screen, dark, (sx - max(2, skull_r + rs // 2) // 2, sy,
+                                max(2, skull_r + rs // 2), max(1, skull_r // 2)))
     eye_r = max(1, rs // 2)
     eye_y = sy - skull_r // 2 - 1
     draw.circle(screen, (30, 25, 20), (sx - eye_r - 1, eye_y), eye_r)
     draw.circle(screen, (30, 25, 20), (sx + eye_r + 1, eye_y), eye_r)
-
-    # Nose (small triangle/hole)
     if rs >= 2:
-        nx = sx
-        ny = sy - 1
         draw.polygon(screen, (40, 35, 25),
-                      [(nx, ny - max(1, rs // 3)), (nx - 1, ny + 1), (nx + 1, ny + 1)])
+                      [(sx, sy - 1 - max(1, rs // 3)), (sx - 1, sy), (sx + 1, sy)])
 
 
 # Re-export creature drawing from its own module for backward compatibility

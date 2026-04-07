@@ -82,11 +82,19 @@ def build_furniture_and_misc(surf, terrain_type, r, g, b, ts):
         pygame.draw.circle(surf, (200, 50, 40), (cx - 2, cy - 3), max(1, ts // 10))
         pygame.draw.circle(surf, (200, 50, 40), (cx + 3, cy - 1), max(1, ts // 10))
     elif terrain_type == FLOWER_BED:
-        colors = [(200, 80, 80), (200, 200, 80), (150, 80, 200), (80, 150, 200)]
-        for i, fc in enumerate(colors):
-            fx = (hash(i * 7) % (ts - 4)) + 2
-            fy = (hash(i * 13) % (ts - 4)) + 2
-            pygame.draw.circle(surf, fc, (fx, fy), max(1, ts // 8))
+        # Green base with small naturalistic flower dots
+        surf.fill((85, 145, 65))
+        # Grass blades
+        for i in range(3):
+            gx = (hash(i * 11 + 3) % (ts - 2)) + 1
+            gy = (hash(i * 17 + 5) % (ts - 2)) + 1
+            pygame.draw.line(surf, (60, 120, 45), (gx, gy), (gx, gy - max(2, ts // 5)))
+        # Small flower dots: white, yellow, soft pink (subdued)
+        flower_colors = [(240, 240, 200), (220, 200, 80), (200, 130, 140), (160, 200, 120)]
+        for i, fc in enumerate(flower_colors):
+            fx = (hash(i * 7 + 99) % (ts - 4)) + 2
+            fy = (hash(i * 13 + 77) % (ts - 4)) + 2
+            pygame.draw.circle(surf, fc, (fx, fy), max(1, ts // 10))
     elif terrain_type == COBBLESTONE:
         for i in range(4):
             for j in range(4):

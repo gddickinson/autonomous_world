@@ -178,6 +178,15 @@ class Game(DialogResultsMixin, MultiplayerMixin):
         self.world = ChunkedWorld(world_w, world_h, seed=seed,
                                   progress_callback=_on_progress,
                                   skip_layouts=_skip_layouts)
+        # When loading a saved world, restore settlements/roads/kingdoms
+        # to the world plan BEFORE structures are accessed
+        if self._pending_world_save and _skip_layouts:
+            self._show_loading("Restoring saved world...", 0.22)
+            from game.data.world_save import restore_world_plan
+            restore_world_plan(self.world.plan, self._pending_world_save)
+            # Rebuild structures from the restored plan
+            self.world.structures = []
+            self.world._build_structures_from_plan()
         self._show_loading("Generating world...", 0.25)
 
         self.camera = Camera(self.world.width, self.world.height, TILE_SIZE)

@@ -52,9 +52,22 @@ def draw_legs_quad(screen, cx, by, body_h, cs, color, walk_sin, offsets=None):
         fx = cx + lx
         fy = by + body_h + lo
         pygame.draw.rect(screen, dark, (fx - leg_w // 2, fy, leg_w, leg_h))
-        # Hoof/paw
-        pygame.draw.rect(screen, darken(color, 40),
-                         (fx - leg_w // 2 - 1, fy + leg_h, leg_w + 2, max(1, cs // 4)))
+        # Paw/hoof (enhanced with rounded shape)
+        paw_c = darken(color, 40)
+        paw_w = leg_w + 2
+        paw_h = max(2, cs // 4)
+        paw_x = fx - leg_w // 2 - 1
+        paw_y = fy + leg_h
+        pygame.draw.rect(screen, paw_c,
+                         (paw_x, paw_y, paw_w, paw_h),
+                         border_radius=max(1, cs // 6))
+        # Toe/claw marks
+        if cs >= 3:
+            for ti in range(3):
+                tx = paw_x + 1 + ti * max(1, paw_w // 3)
+                pygame.draw.line(screen, darken(color, 55),
+                                 (tx, paw_y + paw_h - 1),
+                                 (tx, paw_y + paw_h), 1)
         feet.append((fx, fy + leg_h))
     return feet
 

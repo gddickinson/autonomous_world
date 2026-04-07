@@ -36,9 +36,26 @@ def draw_bird(screen, sx, sy, cs, color, walk_sin, breath, cfg):
         for dx in (-1, 1):
             wx = sx + dx * (br - 1)
             wing_c = darken(color, 10)
+            wing_rect_x = wx - (wing_w if dx < 0 else 0)
+            wing_rect_y = by + 2 + flap * dx
             pygame.draw.ellipse(screen, wing_c,
-                                (wx - (wing_w if dx < 0 else 0), by + 2 + flap * dx,
+                                (wing_rect_x, wing_rect_y,
                                  wing_w, wing_h))
+            # Wing feather lines
+            if cs >= 2:
+                feather_c = darken(color, 20)
+                for fi in range(1, min(4, wing_w // 2)):
+                    fx = wing_rect_x + fi * wing_w // 4
+                    pygame.draw.line(screen, feather_c,
+                                     (fx, wing_rect_y + 1),
+                                     (fx, wing_rect_y + wing_h - 1), 1)
+
+    # Eye ring for birds
+    if cs >= 3:
+        eye_ring_r = max(2, cs // 2)
+        ring_y = by - br // 2
+        pygame.draw.circle(screen, lighten(color, 25),
+                           (sx, ring_y), eye_ring_r, 1)
 
     # Head
     hr = max(2, br)
@@ -54,18 +71,25 @@ def draw_bird(screen, sx, sy, cs, color, walk_sin, breath, cfg):
         pygame.draw.circle(screen, lighten(color, 10), (hx, hy), hr)
         draw_eye(screen, hx + hr // 3, hy - 1, max(1, cs // 4), "predator")
 
-    # Beak
+    # Beak (with color variety)
     beak = cfg.get("beak", "pointed")
+    beak_color = cfg.get("beak_color", (200, 180, 60))
     if beak == "hooked":
-        pygame.draw.polygon(screen, (200, 170, 50),
+        pygame.draw.polygon(screen, beak_color,
                             [(hx + hr, hy), (hx + hr + cs, hy + 1),
                              (hx + hr, hy + cs // 3)])
+        # Hook tip
+        if cs >= 3:
+            pygame.draw.line(screen, darken(beak_color, 30),
+                             (hx + hr + cs, hy + 1),
+                             (hx + hr + cs - 1, hy + 2), 1)
     elif beak == "pointed":
-        pygame.draw.polygon(screen, (200, 180, 60),
+        pygame.draw.polygon(screen, beak_color,
                             [(hx + hr - 1, hy - 1), (hx + hr + cs // 2, hy),
                              (hx + hr - 1, hy + 1)])
     elif beak == "round":
-        pygame.draw.circle(screen, (180, 160, 50), (hx + hr, hy), max(1, cs // 4))
+        pygame.draw.circle(screen, beak_color,
+                           (hx + hr, hy), max(1, cs // 4))
 
     # Comb (chicken)
     if cfg.get("comb"):

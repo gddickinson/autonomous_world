@@ -1,9 +1,31 @@
-"""Beast templates — quadrupeds, ungulates, bears, small critters."""
+"""Beast templates — quadrupeds, ungulates, bears, small critters.
+
+Enhanced with fur texture, paw/hoof detail, and ear variety.
+"""
 
 import pygame
 from game.ui.creatures.draw_utils import (
     darken, lighten, draw_eye, draw_legs_quad, draw_tail, draw_ears
 )
+
+
+def _draw_fur_texture(screen, x, y, w, h, color, density=4):
+    """Draw short fur lines on a body area."""
+    fur_c = darken(color, 8)
+    spacing = max(2, w // density)
+    for col in range(x + 1, x + w - 1, spacing):
+        for row in range(y + 2, y + h - 1, spacing + 1):
+            pygame.draw.line(screen, fur_c, (col, row), (col, row + 1), 1)
+
+
+def _draw_paw_detail(screen, x, y, w, h, color, cs):
+    """Draw paw pads at the foot of a leg."""
+    if cs < 3:
+        return
+    pad_c = darken(color, 30)
+    # Main pad
+    pad_r = max(1, w // 2)
+    pygame.draw.circle(screen, pad_c, (x + w // 2, y + h - 1), pad_r)
 
 
 def draw_quadruped(screen, sx, sy, cs, color, walk_sin, breath, cfg):
@@ -20,6 +42,11 @@ def draw_quadruped(screen, sx, sy, cs, color, walk_sin, breath, cfg):
     bh2 = max(1, body_h // 3)
     pygame.draw.ellipse(screen, belly,
                         (sx - body_w // 3, by + body_h - bh2, body_w * 2 // 3, bh2))
+
+    # Fur texture on body
+    if cs >= 2:
+        _draw_fur_texture(screen, sx - body_w // 2 + 1, by + 1,
+                          body_w - 2, body_h - 2, color)
 
     # Legs
     draw_legs_quad(screen, sx, by, body_h, cs, color, walk_sin,
@@ -99,10 +126,20 @@ def draw_ungulate(screen, sx, sy, cs, color, walk_sin, breath, cfg):
         lo = swing if i % 2 == 0 else -swing
         pygame.draw.rect(screen, dark,
                          (sx + lx - leg_w // 2, by + body_h + lo, leg_w, leg_h))
-        # Hoof
-        pygame.draw.rect(screen, darken(color, 45),
-                         (sx + lx - leg_w // 2 - 1, by + body_h + leg_h + lo,
-                          leg_w + 2, max(1, cs // 3)))
+        # Hoof (enhanced with split detail)
+        hoof_c = darken(color, 45)
+        hoof_x = sx + lx - leg_w // 2 - 1
+        hoof_y = by + body_h + leg_h + lo
+        hoof_w = leg_w + 2
+        hoof_h = max(2, cs // 3)
+        pygame.draw.rect(screen, hoof_c,
+                         (hoof_x, hoof_y, hoof_w, hoof_h),
+                         border_radius=max(1, cs // 5))
+        # Split line in hoof
+        if cs >= 3:
+            pygame.draw.line(screen, darken(color, 55),
+                             (sx + lx, hoof_y),
+                             (sx + lx, hoof_y + hoof_h - 1), 1)
 
     # Head (elongated)
     hr = max(2, cs)
@@ -174,6 +211,10 @@ def draw_bear(screen, sx, sy, cs, color, walk_sin, breath, cfg):
     pygame.draw.ellipse(screen, lighten(color, 12),
                         (sx - body_w // 3, by + body_h // 2,
                          body_w * 2 // 3, body_h // 2))
+    # Thick fur texture
+    if cs >= 2:
+        _draw_fur_texture(screen, sx - body_w // 2 + 1, by + 1,
+                          body_w - 2, body_h - 2, color, density=3)
 
     # Thick legs
     leg_w = max(2, cs)

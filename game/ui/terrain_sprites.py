@@ -1,14 +1,8 @@
-"""Enhanced terrain tile generators — natural terrain procedural pixel-art.
+"""Natural terrain procedural pixel-art tile generators.
 
-Each terrain type gets 4 variants arranged in a horizontal sprite sheet.
-Tiles use dithering, multi-shade color mixing, and natural patterns
-to create much richer visuals than simple colored rectangles.
-
-Natural terrain types: grass, water, forest, dense_forest, mountain,
-sand, snow, swamp.
-
-Built/constructed terrain (road, farmland, wall, etc.) lives in
-terrain_sprites_built.py.
+Each terrain type gets 4 variants in a horizontal sprite sheet.
+Built terrain lives in terrain_sprites_built.py.
+Seasonal variants live in terrain_sprites_seasonal.py.
 """
 
 import pygame
@@ -25,20 +19,16 @@ from game.settings import (
 # Number of tile variants per terrain type
 NUM_VARIANTS = 4
 
-
 def _clamp(v: int, lo: int = 0, hi: int = 255) -> int:
     return max(lo, min(hi, v))
-
 
 def _c(r, g, b):
     """Clamp RGB tuple."""
     return (_clamp(r), _clamp(g), _clamp(b))
 
-
 def _seeded_rng(tile_type: int, variant: int) -> random.Random:
     """Get a deterministic RNG for a specific tile variant."""
     return random.Random(tile_type * 1000 + variant * 7 + 42)
-
 
 def _dither_fill_weighted(surf, ts, color_weights, rng):
     """Fill with weighted color selection: [(color, weight), ...]."""
@@ -53,10 +43,6 @@ def _dither_fill_weighted(surf, ts, color_weights, rng):
                     surf.set_at((x, y), color)
                     break
 
-
-# ============================================================
-# GRASS
-# ============================================================
 
 def _gen_grass(ts: int, variant: int) -> pygame.Surface:
     """Detailed grass tile with dithered base and blade details."""
@@ -111,10 +97,6 @@ def _gen_grass(ts: int, variant: int) -> pygame.Surface:
     return surf
 
 
-# ============================================================
-# WATER (4 animation frames with shifting waves)
-# ============================================================
-
 def _gen_water(ts: int, variant: int) -> pygame.Surface:
     """Detailed water tile with wave patterns and sparkle."""
     rng = _seeded_rng(WATER, variant)
@@ -160,10 +142,6 @@ def _gen_water(ts: int, variant: int) -> pygame.Surface:
 
     return surf
 
-
-# ============================================================
-# FOREST
-# ============================================================
 
 def _gen_forest(ts: int, variant: int) -> pygame.Surface:
     """Detailed forest tile with trunk, canopy, and undergrowth."""
@@ -248,10 +226,6 @@ def _gen_forest(ts: int, variant: int) -> pygame.Surface:
     return surf
 
 
-# ============================================================
-# SAND
-# ============================================================
-
 def _gen_sand(ts: int, variant: int) -> pygame.Surface:
     """Detailed sand with dithered shading and ripple lines."""
     rng = _seeded_rng(SAND, variant)
@@ -299,10 +273,6 @@ def _gen_sand(ts: int, variant: int) -> pygame.Surface:
 
     return surf
 
-
-# ============================================================
-# MOUNTAIN
-# ============================================================
 
 def _gen_mountain(ts: int, variant: int) -> pygame.Surface:
     """Detailed mountain with rock texture and lighting."""
@@ -358,10 +328,6 @@ def _gen_mountain(ts: int, variant: int) -> pygame.Surface:
     return surf
 
 
-# ============================================================
-# SNOW
-# ============================================================
-
 def _gen_snow(ts: int, variant: int) -> pygame.Surface:
     """Detailed snow with subtle blue-grey dithering and sparkles."""
     rng = _seeded_rng(SNOW, variant)
@@ -403,10 +369,6 @@ def _gen_snow(ts: int, variant: int) -> pygame.Surface:
     return surf
 
 
-# ============================================================
-# SWAMP
-# ============================================================
-
 def _gen_swamp(ts: int, variant: int) -> pygame.Surface:
     """Swamp with murky water pools and reed plants."""
     rng = _seeded_rng(SWAMP, variant)
@@ -446,10 +408,6 @@ def _gen_swamp(ts: int, variant: int) -> pygame.Surface:
 
     return surf
 
-
-# ============================================================
-# DENSE FOREST
-# ============================================================
 
 def _gen_dense_forest(ts: int, variant: int) -> pygame.Surface:
     """Dense forest with multiple overlapping canopies."""
@@ -496,10 +454,6 @@ def _gen_dense_forest(ts: int, variant: int) -> pygame.Surface:
     return surf
 
 
-# ============================================================
-# ASSEMBLY — generate all sheets
-# ============================================================
-
 # Natural terrain generators in this module
 _NATURAL_GENERATORS = {
     GRASS: _gen_grass,
@@ -515,12 +469,10 @@ _NATURAL_GENERATORS = {
 # Combined generators (natural + built)
 _GENERATORS = dict(_NATURAL_GENERATORS)
 
-
 def _load_built_generators():
     """Lazily merge built terrain generators."""
     from game.ui.terrain_sprites_built import BUILT_GENERATORS
     _GENERATORS.update(BUILT_GENERATORS)
-
 
 def generate_all_terrain_sheets(ts: int) -> Dict[int, SpriteSheet]:
     """Generate sprite sheets for all terrain types.
@@ -537,3 +489,8 @@ def generate_all_terrain_sheets(ts: int) -> Dict[int, SpriteSheet]:
             sheet_surf.blit(tile, (v * ts, 0))
         sheets[terrain_type] = SpriteSheet(sheet_surf, ts, ts)
     return sheets
+
+
+# Seasonal variants live in terrain_sprites_seasonal.py
+# Import from there directly to avoid circular imports:
+#   from game.ui.terrain_sprites_seasonal import generate_seasonal_variant

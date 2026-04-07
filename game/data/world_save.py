@@ -82,16 +82,21 @@ def _collect_kingdoms(game) -> List[Dict[str, Any]]:
 
 
 def _collect_npc_summary(game) -> Dict[str, Any]:
-    """NPC count per settlement (not full NPC data)."""
-    wm = getattr(game, "world_mgr", None)
-    if not wm:
-        return {"total": 0, "per_settlement": {}}
-    npcs = getattr(wm, "npcs", [])
+    """NPC roster with names, professions, and positions."""
     per_settlement: Dict[str, int] = {}
-    for npc in npcs:
-        sname = getattr(npc, "home_settlement", "") or "wilderness"
-        per_settlement[sname] = per_settlement.get(sname, 0) + 1
-    return {"total": len(npcs), "per_settlement": per_settlement}
+    roster = []
+    # Plan roster is the authoritative source (covers all NPCs)
+    plan = getattr(game, "world", None)
+    plan = getattr(plan, "plan", None) if plan else None
+    if plan and hasattr(plan, "npc_roster") and plan.npc_roster:
+        roster = list(plan.npc_roster)
+    # Also count spawned NPCs per settlement
+    wm = getattr(game, "world_mgr", None)
+    if wm:
+        for npc in getattr(wm, "npcs", []):
+            sname = getattr(npc, "home_settlement", "") or "wilderness"
+            per_settlement[sname] = per_settlement.get(sname, 0) + 1
+    return {"total": len(roster), "per_settlement": per_settlement, "roster": roster}
 
 
 def _collect_player(player, game=None) -> Dict[str, Any]:
@@ -297,6 +302,70 @@ def _write_last_played(seed: int, path: str):
 # ===================================================================
 # Apply loaded state
 # ===================================================================
+
+def restore_world_plan(plan, save_data: Dict[str, Any]):
+    """Restore settlements, roads, and spawn point to a world plan from save data.
+
+    Called BEFORE structures are built, when skip_layouts=True left
+    the plan with empty settlement/road lists.
+    """
+    from game.world.world_plan import SettlementPlan, RoadPlan
+    import random
+
+    saved_settlements = save_data.get("settlements", [])
+    if saved_settlements and not plan.settlements:
+        for sd in saved_settlements:
+            sp = SettlementPlan(
+                name=sd["name"], kind=sd["kind"],
+                x=sd["x"], y=sd["y"],
+                radius=sd.get("radius", 100),
+                region="restored",
+                race=sd.get("race", "Human"),
+                population=sd.get("buildings_count", 10),
+                specialization=sd.get("specialization", "general"),
+            )
+            plan.settlements.append(sp)
+
+    # Restore spawn point from player position
+    pdata = save_data.get("player", {})
+    if pdata.get("x") and pdata.get("y"):
+        plan.spawn_point = (int(pdata["x"]), int(pdata["y"]))
+
+    # Rebuild roads between settlements (deterministic from seed)
+    if plan.settlements and not plan.roads:
+        rng = random.Random(plan.seed)
+        # Simple MST-like road network
+        from game.world.road_pathfinder import find_road_path
+        placed = [plan.settlements[0]]
+        remaining = list(plan.settlements[1:])
+        while remaining:
+            best_dist = float('inf')
+            best_pair = None
+            for p in placed:
+                for r in remaining:
+                    d = (p.x - r.x) ** 2 + (p.y - r.y) ** 2
+                    if d < best_dist:
+                        best_dist = d
+                        best_pair = (p, r)
+            if best_pair is None:
+                break
+            p, r = best_pair
+            remaining.remove(r)
+            placed.append(r)
+            waypoints = find_road_path(plan, p.x, p.y, r.x, r.y)
+            road_type = "king_road" if p.kind in ("city", "castle") or r.kind in ("city", "castle") else "gravel_road"
+            plan.roads.append(RoadPlan(
+                start_name=p.name, end_name=r.name,
+                road_type=road_type, waypoints=waypoints))
+
+    # Restore NPC roster from save (preserves names) or rebuild if not saved
+    saved_roster = save_data.get("npc_summary", {}).get("roster", [])
+    if saved_roster:
+        plan.npc_roster = saved_roster
+    elif plan.settlements and not plan.npc_roster:
+        rng = random.Random(plan.seed + 7)
+        plan._build_npc_roster(rng)
+
 
 def apply_loaded_state(game, save_data: Dict[str, Any]):
     """Apply saved state onto a freshly-generated game.

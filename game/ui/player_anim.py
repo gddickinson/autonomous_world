@@ -8,6 +8,10 @@ from game.ui.character_anim import (
     _darken, _lighten, _EYE_COLOR, _get_skin,
     _draw_melee,
 )
+from game.ui.character_detail import (
+    draw_detailed_head, draw_detailed_eyes, draw_detailed_torso,
+    draw_detailed_arm, draw_detailed_legs,
+)
 
 # Player mode colors
 _MORTAL_BODY = (60, 100, 180)
@@ -115,43 +119,33 @@ def draw_player_body(screen, player, sx: int, sy: int, s: int, mounted=False):
 
     draw = pygame.draw
 
-    # ── Legs (rects sliding vertically) ────────────────────────────
+    # ── Legs (enhanced with boots and knee bends) ─────────────────
     if not mounted:
-        lx = sx - rs
-        rx = sx + rs - leg_w
-        l_leg_y = hip_y + leg_swing + breath_offset
-        r_leg_y = hip_y - leg_swing + breath_offset
-        draw.rect(screen, dark_body, (lx, l_leg_y, leg_w, leg_h))
-        draw.rect(screen, dark_body, (rx, r_leg_y, leg_w, leg_h))
-        foot_h = max(1, rs // 2)
-        draw.rect(screen, dark_body2, (lx - 1, l_leg_y + leg_h, leg_w + 2, foot_h))
-        draw.rect(screen, dark_body2, (rx - 1, r_leg_y + leg_h, leg_w + 2, foot_h))
+        draw_detailed_legs(screen, sx, hip_y, rs, leg_w, leg_h, dark_body,
+                           leg_swing, breath_offset, dark_body2)
 
-    # ── Torso ──────────────────────────────────────────────────────
-    br = max(1, rs // 2)
-    draw.rect(screen, body_color, (torso_x, torso_y, torso_w, torso_h),
-              border_radius=br)
-    if rs >= 3:
-        draw.rect(screen, _darken(body_color, 25),
-                  (torso_x, torso_y, torso_w, torso_h), 1, border_radius=br)
+    # ── Torso (enhanced with collar and belt) ──────────────────────
+    draw_detailed_torso(screen, torso_x, torso_y, torso_w, torso_h,
+                        body_color, rs)
 
-    # ── Arms ───────────────────────────────────────────────────────
+    # ── Arms (enhanced with hands) ─────────────────────────────────
     l_arm_y = arm_top + arm_swing
     r_arm_y = arm_top - arm_swing
-    draw.rect(screen, skin, (la_x, l_arm_y, arm_w, arm_h))
-    draw.rect(screen, skin, (ra_x, r_arm_y, arm_w, arm_h))
+    draw_detailed_arm(screen, la_x, l_arm_y, arm_w, arm_h, skin, rs,
+                      skin_color=skin)
+    draw_detailed_arm(screen, ra_x, r_arm_y, arm_w, arm_h, skin, rs,
+                      skin_color=skin)
 
-    # ── Head ───────────────────────────────────────────────────────
-    draw.circle(screen, skin, (head_x, head_y), head_r)
+    # ── Head (enhanced with hair and ears) ─────────────────────────
+    race = getattr(player, 'race', 'human')
+    entity_id = id(player) % 10000
+    facing = getattr(player, 'facing', (0, 1))
+    draw_detailed_head(screen, skin, head_x, head_y, head_r, rs, race,
+                       entity_id, facing=facing)
 
-    # ── Eyes ───────────────────────────────────────────────────────
-    if rs >= 2:
-        eye_r = max(1, rs // 3)
-        fx, fy = getattr(player, 'facing', (0, 1))
-        eox = int(fx * rs * 0.3)
-        eye_y = head_y - max(1, rs // 4) + int(fy * rs * 0.2)
-        draw.circle(screen, _EYE_COLOR, (head_x - eye_r - 1 + eox, eye_y), eye_r)
-        draw.circle(screen, _EYE_COLOR, (head_x + eye_r + 1 + eox, eye_y), eye_r)
+    # ── Eyes (enhanced with pupils) ────────────────────────────────
+    draw_detailed_eyes(screen, head_x, head_y, head_r, rs,
+                       facing=facing, eye_color=_EYE_COLOR)
 
     # ── Crown (god mode) ──────────────────────────────────────────
     if mode == "god":

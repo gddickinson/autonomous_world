@@ -45,7 +45,7 @@ class RendererEffectsMixin:
         self._seasonal_color_cache[(MARSH, "autumn")] = (95, 100, 50)
         self._seasonal_color_cache[(FRUIT_TREE, "autumn")] = (170, 90, 40)
         self._seasonal_color_cache[(HERB_PATCH, "autumn")] = (100, 110, 50)
-        self._seasonal_color_cache[(FLOWER_BED, "autumn")] = (140, 100, 70)
+        self._seasonal_color_cache[(FLOWER_BED, "autumn")] = (100, 120, 55)
 
         # --- WINTER: white/gray on grass/forest, frozen water ---
         self._seasonal_color_cache[(GRASS, "winter")] = (170, 175, 160)
@@ -57,7 +57,7 @@ class RendererEffectsMixin:
         self._seasonal_color_cache[(SHALLOW_WATER, "winter")] = (140, 180, 215)
         self._seasonal_color_cache[(FRUIT_TREE, "winter")] = (110, 105, 95)
         self._seasonal_color_cache[(HERB_PATCH, "winter")] = (130, 135, 120)
-        self._seasonal_color_cache[(FLOWER_BED, "winter")] = (160, 155, 145)
+        self._seasonal_color_cache[(FLOWER_BED, "winter")] = (140, 148, 128)
 
         # --- Crop tiles (WHEAT_FIELD, VEGETABLE_PLOT) seasonal variants ---
         self._seasonal_color_cache[(WHEAT_FIELD, "spring")] = (150, 165, 60)
@@ -76,9 +76,16 @@ class RendererEffectsMixin:
     def _build_seasonal_tile_cache(self, season: str):
         """Build pre-rendered tile surfaces for a given season.
 
-        Only generates tiles for terrain types that have seasonal color
-        variants. Other terrain types fall through to the default cache.
+        Uses generate_seasonal_variant from terrain_sprites for natural terrain
+        (rich procedural detail). Falls back to color-shifted flat tiles for
+        built/crop terrain types.
         """
+        from game.ui.terrain_sprites_seasonal import generate_seasonal_variant as _gen_sv
+
+        # Natural types that benefit from the full procedural pipeline
+        _NATURAL = frozenset((GRASS, WATER, FOREST, DENSE_FOREST,
+                              MOUNTAIN, SAND, SNOW, SWAMP))
+
         # Clear old seasonal cache
         self._seasonal_tile_cache = {}
 
@@ -89,110 +96,22 @@ class RendererEffectsMixin:
 
         for terrain_type in affected_types:
             key = (terrain_type, season)
+
+            # --- Natural terrain: use full procedural seasonal variant ---
+            if terrain_type in _NATURAL:
+                surf = _gen_sv(terrain_type, season, 0, TILE_SIZE)
+                self._seasonal_tile_cache[key] = surf
+                continue
+
+            # --- Built/crop terrain: color-shifted flat tile ---
             color = self._seasonal_color_cache.get(key)
             if not color:
                 continue
-
             surf = pygame.Surface((TILE_SIZE, TILE_SIZE))
             r, g, b = color
             surf.fill(color)
 
-            # Replicate terrain texture detail with seasonal colors
-            if terrain_type == GRASS:
-                # Grass blades
-                for i in range(4):
-                    x = (hash((i * 7 + terrain_type)) % (TILE_SIZE - 2)) + 1
-                    y = (hash((i * 13 + terrain_type)) % (TILE_SIZE - 2)) + 1
-                    blade_color = (max(0, r - 15), min(255, g + 10), max(0, b - 10))
-                    pygame.draw.line(surf, blade_color, (x, y), (x, y + 2))
-                # Spring: add flower dots
-                if season == "spring":
-                    flower_colors = [(220, 100, 120), (240, 220, 80), (180, 100, 220), (100, 180, 230)]
-                    for i in range(2):
-                        fx = (hash(i * 31 + 5) % (TILE_SIZE - 2)) + 1
-                        fy = (hash(i * 37 + 9) % (TILE_SIZE - 2)) + 1
-                        fc = flower_colors[hash(i * 41) % len(flower_colors)]
-                        surf.set_at((fx, fy), fc)
-                # Winter: add white snow speckles
-                elif season == "winter":
-                    for i in range(5):
-                        sx = hash(i * 19 + 3) % TILE_SIZE
-                        sy = hash(i * 23 + 7) % TILE_SIZE
-                        pygame.draw.circle(surf, (240, 242, 248), (sx, sy), 1)
-
-            elif terrain_type == FOREST:
-                # Ground cover
-                for i in range(6):
-                    gx = (hash(i * 11 + 1) % (TILE_SIZE - 2)) + 1
-                    gy = (hash(i * 17 + 3) % (TILE_SIZE - 2)) + 1
-                    pygame.draw.circle(surf, (max(0, r - 8), min(255, g + 5), max(0, b - 3)),
-                                       (gx, gy), 1)
-                cx, cy = TILE_SIZE // 2, TILE_SIZE // 2
-                if season == "winter":
-                    # Bare tree: visible trunk, minimal canopy
-                    pygame.draw.rect(surf, (75, 50, 30), (cx - 2, cy - 2, 4, 10))
-                    # Sparse branches
-                    pygame.draw.line(surf, (85, 60, 35), (cx, cy - 1), (cx - 4, cy - 4))
-                    pygame.draw.line(surf, (85, 60, 35), (cx, cy), (cx + 4, cy - 3))
-                    # Snow on branches
-                    pygame.draw.circle(surf, (230, 235, 242), (cx - 3, cy - 4), 1)
-                    pygame.draw.circle(surf, (230, 235, 242), (cx + 3, cy - 3), 1)
-                else:
-                    # Normal tree with seasonal canopy color
-                    pygame.draw.rect(surf, (75, 50, 30), (cx - 2, cy + 2, 4, 7))
-                    pygame.draw.circle(surf, (max(0, r - 15), g, max(0, b - 8)), (cx, cy - 2), 7)
-                    pygame.draw.circle(surf, (max(0, r - 5), min(255, g + 15), max(0, b - 3)),
-                                       (cx - 1, cy - 3), 6)
-                    if season == "autumn":
-                        # Add scattered orange/red dots on canopy
-                        for i in range(3):
-                            dx = (hash(i * 7 + 99) % 10) - 5 + cx
-                            dy = (hash(i * 11 + 77) % 8) - 5 + cy
-                            dot_c = [(200, 80, 30), (220, 160, 40), (180, 50, 30)][i % 3]
-                            if 0 <= dx < TILE_SIZE and 0 <= dy < TILE_SIZE:
-                                surf.set_at((dx, dy), dot_c)
-
-            elif terrain_type == DENSE_FOREST:
-                trees = [(5, 5, 5), (11, 4, 6), (8, 12, 5), (14, 11, 4)]
-                if season == "winter":
-                    # Bare trees with snow
-                    for ox, oy, tr in trees:
-                        if ox < TILE_SIZE and oy < TILE_SIZE:
-                            pygame.draw.rect(surf, (55, 35, 22), (ox, oy, 2, 6))
-                            pygame.draw.line(surf, (65, 45, 30), (ox, oy), (ox - 3, oy - 3))
-                            pygame.draw.line(surf, (65, 45, 30), (ox + 1, oy + 1), (ox + 4, oy - 2))
-                    for i in range(6):
-                        sx_s = hash(i * 17 + 5) % TILE_SIZE
-                        sy_s = hash(i * 23 + 9) % TILE_SIZE
-                        pygame.draw.circle(surf, (235, 238, 245), (sx_s, sy_s), 1)
-                else:
-                    for ox, oy, tr in trees:
-                        if ox < TILE_SIZE and oy < TILE_SIZE:
-                            pygame.draw.rect(surf, (55, 35, 22), (ox, oy + tr, 2, 4))
-                            pygame.draw.circle(surf, (max(0, r - 8), min(255, g + 8), max(0, b - 5)),
-                                               (ox, oy), tr)
-
-            elif terrain_type in (WATER, SHALLOW_WATER):
-                # Frozen/shifted water
-                surf.fill(color)
-                if season == "winter":
-                    # Ice cracks
-                    for i in range(3):
-                        ix = (hash(i * 13 + 1) % (TILE_SIZE - 4)) + 2
-                        iy = (hash(i * 17 + 3) % (TILE_SIZE - 4)) + 2
-                        pygame.draw.line(surf, (min(255, r + 20), min(255, g + 15), min(255, b + 10)),
-                                         (ix, iy), (ix + 3, iy + 2))
-                else:
-                    # Wave pattern with seasonal tint
-                    for i in range(3):
-                        y_pos = 5 + i * 5
-                        wave_color = (min(255, r + 25), min(255, g + 25), min(255, b + 25))
-                        for px in range(TILE_SIZE):
-                            offset = (px * 3 + i * 7) % 4
-                            if offset < 2:
-                                surf.set_at((px, y_pos), wave_color)
-
-            elif terrain_type == FARMLAND:
+            if terrain_type == FARMLAND:
                 for i in range(2, TILE_SIZE - 2, 4):
                     pygame.draw.line(surf, (max(0, r - 15), max(0, g - 15), max(0, b - 10)),
                                      (i, 2), (i, TILE_SIZE - 2))
@@ -236,25 +155,30 @@ class RendererEffectsMixin:
                                      (px_h, py_h), (px_h, py_h - TILE_SIZE // 4))
 
             elif terrain_type == FLOWER_BED:
+                surf.fill(color)
+                ts = TILE_SIZE
                 if season == "winter":
-                    # Dead flowers, brown
-                    for i in range(4):
-                        fx = (hash(i * 7) % (TILE_SIZE - 4)) + 2
-                        fy = (hash(i * 13) % (TILE_SIZE - 4)) + 2
-                        pygame.draw.circle(surf, (130, 115, 95), (fx, fy), max(1, TILE_SIZE // 8))
+                    for i in range(3):
+                        fx = (hash(i * 7) % (ts - 4)) + 2
+                        fy = (hash(i * 13) % (ts - 4)) + 2
+                        pygame.draw.circle(surf, (160, 145, 120), (fx, fy), max(1, ts // 12))
                 elif season == "autumn":
-                    colors = [(180, 100, 50), (160, 80, 40), (140, 90, 60), (170, 120, 50)]
-                    for i, fc in enumerate(colors):
-                        fx = (hash(i * 7) % (TILE_SIZE - 4)) + 2
-                        fy = (hash(i * 13) % (TILE_SIZE - 4)) + 2
-                        pygame.draw.circle(surf, fc, (fx, fy), max(1, TILE_SIZE // 8))
+                    flower_c = [(200, 160, 60), (180, 120, 50), (160, 100, 50), (190, 170, 80)]
+                    for i, fc in enumerate(flower_c):
+                        fx = (hash(i * 7) % (ts - 4)) + 2
+                        fy = (hash(i * 13) % (ts - 4)) + 2
+                        pygame.draw.circle(surf, fc, (fx, fy), max(1, ts // 10))
                 else:
-                    # Spring: extra vibrant flowers
-                    colors = [(230, 80, 100), (240, 230, 80), (170, 80, 220), (80, 170, 230)]
-                    for i, fc in enumerate(colors):
-                        fx = (hash(i * 7) % (TILE_SIZE - 4)) + 2
-                        fy = (hash(i * 13) % (TILE_SIZE - 4)) + 2
-                        pygame.draw.circle(surf, fc, (fx, fy), max(1, TILE_SIZE // 8))
+                    for i in range(3):
+                        gx = (hash(i * 11 + 3) % (ts - 2)) + 1
+                        gy = (hash(i * 17 + 5) % (ts - 2)) + 1
+                        pygame.draw.line(surf, (max(0, r - 20), min(255, g + 5), max(0, b - 15)),
+                                         (gx, gy), (gx, gy - max(2, ts // 5)))
+                    flower_c = [(240, 240, 200), (220, 200, 80), (200, 130, 140), (160, 200, 120)]
+                    for i, fc in enumerate(flower_c):
+                        fx = (hash(i * 7 + 99) % (ts - 4)) + 2
+                        fy = (hash(i * 13 + 77) % (ts - 4)) + 2
+                        pygame.draw.circle(surf, fc, (fx, fy), max(1, ts // 10))
 
             self._seasonal_tile_cache[(terrain_type, season)] = surf
 

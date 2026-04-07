@@ -4,6 +4,7 @@ import random
 import math
 from typing import List
 from game.core.npc import NPC
+from game.core.items import make_item
 from game.settings import *
 
 

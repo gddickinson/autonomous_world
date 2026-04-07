@@ -3,6 +3,7 @@
 import pygame
 from typing import Optional
 from game.settings import *
+from game.ui.item_icons import get_item_icon
 
 class PanelsInventoryMixin:
     """Inventory UI panel."""
@@ -26,29 +27,37 @@ class PanelsInventoryMixin:
         weapon_name = player.equipped_weapon.name if player.equipped_weapon else "None"
         armor_name = player.equipped_armor.name if player.equipped_armor else "None"
 
-        # Weapon with rarity color
+        # Weapon with rarity color + icon
         wlabel = self.font_sm.render("Weapon: ", True, (150, 150, 170))
         self.screen.blit(wlabel, (ix + 20, y))
+        wlabel_end = ix + 20 + wlabel.get_width()
         if player.equipped_weapon:
+            w_icon = get_item_icon(weapon_name, "weapon")
+            self.screen.blit(w_icon, (wlabel_end, y))
             _, wcolor = self._get_item_rarity(player.equipped_weapon)
             durability_str = ""
             if hasattr(player.equipped_weapon, 'durability') and player.equipped_weapon.durability is not None:
                 durability_str = f" [{player.equipped_weapon.durability}%]"
             wname_surf = self.font_sm.render(f"{weapon_name}{durability_str}", True, wcolor)
+            self.screen.blit(wname_surf, (wlabel_end + 16, y))
         else:
             wname_surf = self.font_sm.render(weapon_name, True, GRAY)
-        self.screen.blit(wname_surf, (ix + 20 + wlabel.get_width(), y))
+            self.screen.blit(wname_surf, (wlabel_end, y))
 
         # Armor on same line (right side)
         alabel = self.font_sm.render("Armor: ", True, (150, 150, 170))
         ax = ix + iw // 2 + 10
         self.screen.blit(alabel, (ax, y))
+        alabel_end = ax + alabel.get_width()
         if player.equipped_armor:
+            a_icon = get_item_icon(armor_name, "armor")
+            self.screen.blit(a_icon, (alabel_end, y))
             _, acolor = self._get_item_rarity(player.equipped_armor)
             aname_surf = self.font_sm.render(armor_name, True, acolor)
+            self.screen.blit(aname_surf, (alabel_end + 16, y))
         else:
             aname_surf = self.font_sm.render(armor_name, True, GRAY)
-        self.screen.blit(aname_surf, (ax + alabel.get_width(), y))
+            self.screen.blit(aname_surf, (alabel_end, y))
         y += 16
 
         self.screen.blit(self.font_sm.render(
@@ -113,14 +122,9 @@ class PanelsInventoryMixin:
                 count_str = f" x{item.count}" if item.stackable and item.count > 1 else ""
                 text = f"{item.name}{count_str}"
 
-                # Kind indicator dot
-                kind_color = {
-                    ITEM_WEAPON: YELLOW, ITEM_ARMOR: LIGHT_GRAY, ITEM_CONSUMABLE: GREEN,
-                    ITEM_RESOURCE: ORANGE, ITEM_QUEST: (200, 100, 255),
-                    ITEM_FOOD: (120, 200, 80), ITEM_DRINK: (80, 160, 220), ITEM_TOOL: (200, 180, 100),
-                }.get(item.kind, UI_TEXT)
-
-                pygame.draw.circle(self.screen, kind_color, (ix + 12, y + 7), 4)
+                # Item icon (procedural)
+                icon = get_item_icon(item.name, getattr(item, 'kind', ''))
+                self.screen.blit(icon, (ix + 6, y + 1))
 
                 # Item name in rarity color (or highlighted if selected)
                 name_color = YELLOW if is_selected else rarity_color

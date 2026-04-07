@@ -74,6 +74,32 @@ class UI:
         # Inventory state
         self.inv_selected = 0
 
+        # Smooth bar lerp state (for animated HP/Energy transitions)
+        self._hp_display = -1.0       # -1 = uninitialised (copy from player on first frame)
+        self._energy_display = -1.0
+        self._bar_lerp_speed = 8.0    # units per second; fast enough to feel responsive
+
+        # Ghost bar state: tracks "lost HP" that fades after damage
+        self._hp_ghost = -1.0         # ghost bar tracks the old HP before damage
+        self._hp_ghost_timer = 0.0    # how long ghost bar has been showing
+        self._energy_ghost = -1.0
+        self._energy_ghost_timer = 0.0
+
+        # Panel slide-in animation
+        self._panel_slide_progress = 1.0  # 0 = offscreen, 1 = fully visible
+        self._panel_slide_active = False
+        self._last_panel_state = False
+
+        # Dawn/dusk color flash overlay
+        self._time_flash_alpha = 0.0
+        self._time_flash_color = (0, 0, 0)
+        self._last_time_phase = ""
+
+        # Building enter/exit fade
+        self._building_fade_alpha = 0.0
+        self._building_fade_direction = 0  # +1 = fading in, -1 = fading out
+        self._was_indoor = False
+
     @property
     def any_panel_open(self) -> bool:
         return (self.show_inventory or self.show_quest_log or self.show_character
@@ -98,17 +124,56 @@ class UI:
         self.llm_response_text = ""
         self.llm_waiting = False
 
-    def _draw_panel(self, x: int, y: int, w: int, h: int, title: str = ""):
-        """Draw a semi-transparent panel."""
+    # Panel title-bar color themes
+    _PANEL_THEMES = {
+        "character":  (60, 40, 90),    # deep purple — character sheet
+        "inventory":  (30, 55, 80),    # dark blue — inventory
+        "quest":      (70, 50, 20),    # dark gold — quest log
+        "chronicle":  (50, 35, 15),    # dark amber — chronicle
+        "shop":       (20, 55, 35),    # dark green — shop/barter
+        "dialog":     (25, 35, 60),    # dark blue — dialog
+        "default":    (30, 30, 45),    # dark slate — fallback
+    }
+
+    def _draw_panel(self, x: int, y: int, w: int, h: int, title: str = "",
+                    theme: str = "default"):
+        """Draw a styled panel with decorative border and themed title bar."""
+        # Main background — slightly parchment-tinted dark
         panel = pygame.Surface((w, h), pygame.SRCALPHA)
-        panel.fill((15, 15, 25, 220))
+        panel.fill((18, 18, 28, 225))
+        # Subtle parchment texture: dither-like lighter rows
+        for row in range(0, h, 8):
+            s = pygame.Surface((w, 1), pygame.SRCALPHA)
+            s.fill((255, 240, 200, 8))
+            panel.blit(s, (0, row))
         self.screen.blit(panel, (x, y))
-        pygame.draw.rect(self.screen, UI_BORDER, (x, y, w, h), 2)
+
+        # Outer border (double-line effect)
+        outer_color = (100, 100, 120)
+        inner_color = (60, 65, 80)
+        pygame.draw.rect(self.screen, outer_color, (x, y, w, h), 2)
+        pygame.draw.rect(self.screen, inner_color, (x + 3, y + 3, w - 6, h - 6), 1)
+
+        # Corner accent squares
+        corner_size = 5
+        corner_color = (130, 130, 150)
+        for cx2, cy2 in [(x, y), (x + w - corner_size, y),
+                         (x, y + h - corner_size), (x + w - corner_size, y + h - corner_size)]:
+            pygame.draw.rect(self.screen, corner_color, (cx2, cy2, corner_size, corner_size))
 
         if title:
+            # Colored title bar
+            bar_color = self._PANEL_THEMES.get(theme, self._PANEL_THEMES["default"])
+            bar_h = 30
+            bar_surf = pygame.Surface((w - 8, bar_h), pygame.SRCALPHA)
+            bar_surf.fill((*bar_color, 230))
+            self.screen.blit(bar_surf, (x + 4, y + 4))
+            # Title text in bold
             title_surf = self.font_lg.render(title, True, UI_HIGHLIGHT)
-            self.screen.blit(title_surf, (x + 10, y + 8))
-            pygame.draw.line(self.screen, UI_BORDER, (x + 5, y + 32), (x + w - 5, y + 32))
+            self.screen.blit(title_surf, (x + 12, y + 6))
+            # Separator line below title bar
+            pygame.draw.line(self.screen, outer_color, (x + 4, y + 34), (x + w - 4, y + 34))
+            pygame.draw.line(self.screen, inner_color, (x + 4, y + 35), (x + w - 4, y + 35))
 
     def _wrap_text(self, text: str, max_width: int, font) -> List[str]:
         """Word-wrap text to fit width."""
@@ -132,21 +197,65 @@ class UI:
     # HUD
     # ================================================================
 
-    def draw_hud(self, player: Player, time_sys: TimeSystem):
+    def draw_hud(self, player: Player, time_sys: TimeSystem, dt: float = 0.016):
         """Draw the heads-up display."""
-        # HP bar
-        self._draw_bar(10, SCREEN_HEIGHT - 50, 200, 18, player.hp, player.max_hp,
-                       UI_HP_BAR, f"HP: {int(player.hp)}/{player.max_hp}")
+        # -- Smooth lerp for HP and Energy bars --
+        if self._hp_display < 0:
+            self._hp_display = float(player.hp)
+            self._hp_ghost = float(player.hp)
+        if self._energy_display < 0:
+            self._energy_display = float(player.energy)
+            self._energy_ghost = float(player.energy)
 
-        # Energy bar
-        self._draw_bar(10, SCREEN_HEIGHT - 28, 200, 14,
-                       player.energy, player.max_energy,
-                       UI_ENERGY_BAR, f"Energy: {int(player.energy)}")
+        # Lerp toward actual value (fast enough to track but visually smooth)
+        lerp_k = min(1.0, self._bar_lerp_speed * dt)
+        self._hp_display += (player.hp - self._hp_display) * lerp_k
+        self._energy_display += (player.energy - self._energy_display) * lerp_k
 
-        # XP bar
+        # Ghost bar management: when HP drops, ghost stays high, then fades
+        if player.hp < self._hp_ghost - 0.5:
+            # HP just dropped — start ghost fade timer
+            self._hp_ghost_timer = 0.3  # show ghost for 0.3s before fading
+        if self._hp_ghost_timer > 0:
+            self._hp_ghost_timer -= dt
+        else:
+            # Fade ghost toward current HP
+            ghost_k = min(1.0, 4.0 * dt)
+            self._hp_ghost += (player.hp - self._hp_ghost) * ghost_k
+        if player.hp > self._hp_ghost:
+            self._hp_ghost = float(player.hp)
+
+        # Same for energy ghost
+        if player.energy < self._energy_ghost - 0.5:
+            self._energy_ghost_timer = 0.3
+        if self._energy_ghost_timer > 0:
+            self._energy_ghost_timer -= dt
+        else:
+            ghost_k = min(1.0, 4.0 * dt)
+            self._energy_ghost += (player.energy - self._energy_ghost) * ghost_k
+        if player.energy > self._energy_ghost:
+            self._energy_ghost = float(player.energy)
+
+        # HP bar with ghost
+        hp_color = (220, 40, 40) if player.hp < player.max_hp * 0.3 else UI_HP_BAR
+        self._draw_bar_with_ghost(
+            10, SCREEN_HEIGHT - 50, 200, 18,
+            self._hp_display, self._hp_ghost, player.max_hp,
+            hp_color, (180, 60, 60), f"HP: {int(player.hp)}/{player.max_hp}")
+
+        # Energy bar with ghost
+        self._draw_bar_with_ghost(
+            10, SCREEN_HEIGHT - 28, 200, 14,
+            self._energy_display, self._energy_ghost, player.max_energy,
+            UI_ENERGY_BAR, (60, 100, 140), f"Energy: {int(player.energy)}")
+
+        # Buff/debuff icons above HP bar
+        self._draw_buff_icons(player)
+
+        # XP bar (gold fill, no ghost)
         self._draw_bar(10, SCREEN_HEIGHT - 12, 200, 10,
                        player.xp, player.xp_to_next,
-                       UI_XP_BAR, "")
+                       (200, 180, 60), "")
 
         # Level and gold
         level_text = self.font_md.render(f"Lv.{player.level}", True, YELLOW)
@@ -324,6 +433,92 @@ class UI:
             text_surf = self.font_sm.render(text, True, WHITE)
             self.screen.blit(text_surf, (x + 4, y + (h - text_surf.get_height()) // 2))
 
+    def _draw_bar_with_ghost(self, x: int, y: int, w: int, h: int,
+                             current: float, ghost: float, maximum: float,
+                             color: tuple, ghost_color: tuple, text: str):
+        """Draw a bar with a ghost (lost value) effect.
+
+        The ghost portion appears as a lighter/faded extension that fades
+        smoothly after damage, giving a visual cue of how much was lost.
+        """
+        bg = pygame.Surface((w + 2, h + 2), pygame.SRCALPHA)
+        bg.fill((0, 0, 0, 140))
+        self.screen.blit(bg, (x - 1, y - 1))
+
+        max_val = max(1, maximum)
+
+        # Ghost bar (drawn first, underneath current bar)
+        ghost_ratio = max(0, min(1, ghost / max_val))
+        ghost_w = int(w * ghost_ratio)
+        if ghost_w > 0:
+            ghost_surf = pygame.Surface((ghost_w, h), pygame.SRCALPHA)
+            ghost_surf.fill((*ghost_color, 140))
+            self.screen.blit(ghost_surf, (x, y))
+
+        # Current bar (drawn on top)
+        ratio = max(0, min(1, current / max_val))
+        bar_w = int(w * ratio)
+        if bar_w > 0:
+            pygame.draw.rect(self.screen, color, (x, y, bar_w, h))
+
+        pygame.draw.rect(self.screen, UI_BORDER, (x - 1, y - 1, w + 2, h + 2), 1)
+
+        if text:
+            text_surf = self.font_sm.render(text, True, WHITE)
+            self.screen.blit(text_surf, (x + 4, y + (h - text_surf.get_height()) // 2))
+
+    def _draw_buff_icons(self, player: Player):
+        """Draw small colored squares above the HP bar for active buffs/debuffs."""
+        buffs = getattr(player, 'active_buffs', None) or []
+        debuffs = getattr(player, 'active_debuffs', None) or []
+        # Also check status_effects dict pattern
+        status = getattr(player, 'status_effects', {}) or {}
+
+        # Build a list of (label, color) pairs
+        icons = []
+        _buff_colors = {
+            "blessed": (220, 200, 80),
+            "haste":   (100, 200, 255),
+            "shield":  (120, 180, 220),
+            "regen":   (80, 220, 120),
+            "strength":(220, 100, 60),
+            "poison":  (80, 200, 60),
+            "burning":  (255, 120, 40),
+            "frozen":  (140, 200, 255),
+            "stunned": (200, 200, 80),
+            "cursed":  (160, 60, 220),
+            "bleed":   (200, 40, 40),
+        }
+        for b in buffs:
+            name = b if isinstance(b, str) else getattr(b, 'name', str(b))
+            col = _buff_colors.get(name.lower(), (180, 180, 80))
+            icons.append((name[:2].upper(), col))
+        for d in debuffs:
+            name = d if isinstance(d, str) else getattr(d, 'name', str(d))
+            col = _buff_colors.get(name.lower(), (200, 80, 80))
+            icons.append((name[:2].upper(), col))
+        for sname, sval in status.items():
+            if sval:
+                col = _buff_colors.get(sname.lower(), (200, 120, 80))
+                icons.append((sname[:2].upper(), col))
+
+        if not icons:
+            return
+
+        icon_size = 12
+        icon_gap = 3
+        ix = 10
+        iy = SCREEN_HEIGHT - 66
+        for label, col in icons[:8]:  # show up to 8
+            pygame.draw.rect(self.screen, col, (ix, iy, icon_size, icon_size))
+            pygame.draw.rect(self.screen, (0, 0, 0), (ix, iy, icon_size, icon_size), 1)
+            if not hasattr(self, '_buff_font'):
+                self._buff_font = pygame.font.SysFont("monospace", 8, bold=True)
+            lsurf = self._buff_font.render(label, True, (0, 0, 0))
+            self.screen.blit(lsurf, (ix + icon_size // 2 - lsurf.get_width() // 2,
+                                     iy + icon_size // 2 - lsurf.get_height() // 2))
+            ix += icon_size + icon_gap
+
     def draw_notifications(self, notifications: List[Notification]):
         y = SCREEN_HEIGHT - 90
         for notif in reversed(notifications[-5:]):
@@ -333,6 +528,86 @@ class UI:
                 text_surf.set_alpha(alpha)
             self.screen.blit(text_surf, (SCREEN_WIDTH // 2 - text_surf.get_width() // 2, y))
             y -= 22
+
+    # ================================================================
+    # TRANSITION EFFECTS
+    # ================================================================
+
+    def update_transitions(self, dt: float, time_phase: str = "",
+                           is_indoor: bool = False):
+        """Update all smooth transition effects. Call once per frame.
+
+        Args:
+            dt: frame delta in seconds.
+            time_phase: "dawn", "day", "dusk", "night" for color flash.
+            is_indoor: True if the player is inside a building.
+        """
+        # --- Panel slide-in ---
+        panel_open = self.any_panel_open
+        if panel_open and not self._last_panel_state:
+            # Panel just opened — start slide animation
+            self._panel_slide_progress = 0.0
+            self._panel_slide_active = True
+        self._last_panel_state = panel_open
+
+        if self._panel_slide_active:
+            self._panel_slide_progress += dt / 0.1  # 100ms ease-in
+            if self._panel_slide_progress >= 1.0:
+                self._panel_slide_progress = 1.0
+                self._panel_slide_active = False
+
+        # --- Dawn/dusk color flash ---
+        if time_phase and time_phase != self._last_time_phase:
+            if time_phase == "dawn":
+                self._time_flash_alpha = 60
+                self._time_flash_color = (220, 160, 60)
+            elif time_phase == "dusk":
+                self._time_flash_alpha = 50
+                self._time_flash_color = (200, 100, 60)
+            self._last_time_phase = time_phase
+
+        if self._time_flash_alpha > 0:
+            self._time_flash_alpha = max(0, self._time_flash_alpha - 120 * dt)
+
+        # --- Building enter/exit fade ---
+        if is_indoor and not self._was_indoor:
+            self._building_fade_alpha = 255
+            self._building_fade_direction = -1  # fade from black
+        elif not is_indoor and self._was_indoor:
+            self._building_fade_alpha = 255
+            self._building_fade_direction = -1
+        self._was_indoor = is_indoor
+
+        if self._building_fade_alpha > 0:
+            # Fade out over 200ms
+            self._building_fade_alpha = max(
+                0, self._building_fade_alpha - 1275 * dt)  # 255/0.2
+
+    def draw_transitions(self):
+        """Draw active transition overlays. Call after panels are drawn."""
+        # Dawn/dusk color flash
+        if self._time_flash_alpha > 2:
+            flash = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
+            r, g, b = self._time_flash_color
+            flash.fill((r, g, b, int(self._time_flash_alpha)))
+            self.screen.blit(flash, (0, 0))
+
+        # Building fade
+        if self._building_fade_alpha > 2:
+            fade = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
+            fade.fill((0, 0, 0, int(self._building_fade_alpha)))
+            self.screen.blit(fade, (0, 0))
+
+    def get_panel_slide_offset(self) -> int:
+        """Return x-offset for panel slide-in animation (0 = fully visible).
+
+        Panels that support sliding should add this offset to their x position.
+        """
+        if self._panel_slide_progress >= 1.0:
+            return 0
+        # Ease-in: starts from right side of screen
+        t = 1.0 - self._panel_slide_progress
+        return int(SCREEN_WIDTH * 0.3 * t * t)  # quadratic ease
 
     # ================================================================
     # INTERACTION PROMPTS
@@ -404,7 +679,7 @@ class UI:
         dy = SCREEN_HEIGHT - dh - 60
 
         title = f"{npc.name} - {getattr(npc, 'race', '')} {getattr(npc, 'char_class', npc.profession)} Lv.{getattr(npc, 'level', 1)}"
-        self._draw_panel(dx, dy, dw, dh, title)
+        self._draw_panel(dx, dy, dw, dh, title, theme="dialog")
 
         # NPC info line (needs, consciousness)
         info_parts = []
@@ -510,7 +785,7 @@ class UI:
         dx = SCREEN_WIDTH // 2 - dw // 2
         dy = SCREEN_HEIGHT - dh - 60
 
-        self._draw_panel(dx, dy, dw, dh, f"Talking to {npc.name}")
+        self._draw_panel(dx, dy, dw, dh, f"Talking to {npc.name}", theme="dialog")
 
         y = dy + 42
 
@@ -636,7 +911,7 @@ class UI:
             title = f"Barter with {self.shop_npc.name} [{mode_label}]"
         else:
             title = f"{self.shop_npc.name}'s Shop [{mode_label}]"
-        self._draw_panel(sx, sy, sw, sh, title)
+        self._draw_panel(sx, sy, sw, sh, title, theme="shop")
 
         gold_text = self.font_md.render(f"Your Gold: {player.gold}", True, YELLOW)
         self.screen.blit(gold_text, (sx + sw - gold_text.get_width() - 15, sy + 8))
@@ -784,7 +1059,7 @@ class UI:
         gx = SCREEN_WIDTH // 2 - gw // 2
         gy = SCREEN_HEIGHT // 2 - gh // 2
 
-        self._draw_panel(gx, gy, gw, gh, f"Give a Gift to {npc.name}")
+        self._draw_panel(gx, gy, gw, gh, f"Give a Gift to {npc.name}", theme="shop")
 
         if not items:
             no_items = self.font_md.render("You have nothing to give.", True, GRAY)
@@ -907,7 +1182,7 @@ class UI:
         ix = SCREEN_WIDTH // 2 - iw // 2
         iy = SCREEN_HEIGHT // 2 - ih // 2
 
-        self._draw_panel(ix, iy, iw, ih, f"Inventory ({len(player.inventory)}/20)")
+        self._draw_panel(ix, iy, iw, ih, f"Inventory ({len(player.inventory)}/20)", theme="inventory")
 
         # -- Equipped items section (top) --
         y = iy + 42
@@ -1125,7 +1400,7 @@ class UI:
         race = getattr(player, 'race', 'Human')
         char_class = getattr(player, 'char_class', 'Fighter')
         self._draw_panel(cx, cy, cw, ch,
-                        f"{race} {char_class} - Level {player.level}")
+                        f"{race} {char_class} - Level {player.level}", theme="character")
 
         y = cy + 42
         col2 = cx + cw // 2 + 10
@@ -1315,7 +1590,7 @@ class UI:
         qx = SCREEN_WIDTH // 2 - qw // 2
         qy = SCREEN_HEIGHT // 2 - qh // 2
 
-        self._draw_panel(qx, qy, qw, qh, f"Quest Log ({len(quests)}/5)")
+        self._draw_panel(qx, qy, qw, qh, f"Quest Log ({len(quests)}/5)", theme="quest")
 
         y = qy + 42
         if not quests:
@@ -1406,7 +1681,7 @@ class UI:
         cx = SCREEN_WIDTH // 2 - cw // 2
         cy = SCREEN_HEIGHT // 2 - ch // 2
 
-        self._draw_panel(cx, cy, cw, ch, "")
+        self._draw_panel(cx, cy, cw, ch, "", theme="chronicle")
 
         # Title
         title_surf = self.font_lg.render("THE CHRONICLE OF THE REALM", True, (220, 200, 140))
